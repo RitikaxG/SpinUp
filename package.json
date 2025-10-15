@@ -1,0 +1,32 @@
+{
+  "name": "with-tailwind",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "check-types": "turbo run check-types",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "upload:base": "bun scripts/upload-base-app-to-s3.ts"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.0",
+    "prettier-plugin-tailwindcss": "^0.6.11",
+    "turbo": "^2.5.5"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "packageManager": "bun@1.2.18",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "dependencies": {
+    "@types/mime-types": "^3.0.1",
+    "client-s3": "aws-sdk/client-s3",
+    "fs": "^0.0.1-security",
+    "mime-types": "^3.0.1",
+    "tsx": "^4.20.3"
+  }
+}

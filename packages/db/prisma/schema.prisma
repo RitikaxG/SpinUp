@@ -1,0 +1,53 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// 1 User => Many Projects
+model User{
+  id               String @default(cuid()) @id
+  clerkId          String @unique
+  email            String @unique
+  name             String
+  provider         String?
+  profileImageUrl  String?
+  providerUserId   String?
+  createdAt       DateTime @default(now())
+
+  projects        ProjectRoom[]
+}
+
+// 1 Project => Many Users ( Devs )
+model Project {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  type      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+ 
+  members   ProjectRoom[]
+}
+
+// Each User-Project link is stored here
+model ProjectRoom {
+  id       String @id @default(cuid())
+  projectId   String
+  userId   String
+  joinedAt DateTime @default(now())
+
+  user    User @relation(fields: [userId], references: [id])
+  project    Project @relation(fields: [projectId], references: [id])
+
+  @@unique([userId,projectId], name : "userId_projectId")
+}

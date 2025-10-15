@@ -1,0 +1,23 @@
+{
+  "name": "vm-base-config",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.858.0",
+    "@smithy/util-stream": "^4.2.3",
+    "@types/chokidar": "^2.1.7",
+    "@types/lodash.debounce": "^4.0.9",
+    "chokidar": "^4.0.3",
+    "fs": "^0.0.1-security",
+    "lodash.debounce": "^4.0.8",
+    "mime-types": "^3.0.1",
+    "stream-to-buffer": "^0.1.0"
+  }
+}
