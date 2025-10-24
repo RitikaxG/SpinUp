@@ -94,7 +94,7 @@ async function ensureBucketExits(bucketName : string){
 async function uploadFilesToS3(){
     const allFilePaths = getAllFilePaths(basePath);
 
-    await ensureBucketExits("bolt-app");
+    await ensureBucketExits("bolt-app-v2");
 
     for(const filePath of allFilePaths){
         
@@ -106,7 +106,7 @@ async function uploadFilesToS3(){
         const s3Key = `base-app/${relativeFilePath}`;
 
         const command = new PutObjectCommand({
-            Bucket : "bolt-app",
+            Bucket : "bolt-app-v2",
             Key : s3Key,
             ContentType : contentType,
             Body : fileContent

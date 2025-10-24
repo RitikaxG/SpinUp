@@ -18,6 +18,7 @@ export const asgClient = new AutoScalingClient({
     }
 })
 
+
 export const ec2Client = new EC2Client({
     region : 'ap-south-1',
     credentials : {

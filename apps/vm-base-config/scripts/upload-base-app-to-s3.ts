@@ -3,6 +3,8 @@ import fs from "fs";
 import mime from "mime-types"; // Use mime to get the content type
 import { S3Client, PutObjectCommand, HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 
+const S3_BUCKET_NAME = "bolt-app-v2";
+
 // Returns all files present in a dir
 function getAllFilePaths(dir: string){
     const EXCLUDE = new Set([
@@ -93,7 +95,7 @@ export async function uploadFilesToS3(folderToUpload : string, s3Prefix : string
 
     const allFilePaths = getAllFilePaths(basePath);
 
-    await ensureBucketExits("bolt-app");
+    await ensureBucketExits(S3_BUCKET_NAME);
 
     for(const filePath of allFilePaths){
         
@@ -106,7 +108,7 @@ export async function uploadFilesToS3(folderToUpload : string, s3Prefix : string
         const s3Key = `${s3Prefix}/${relativeFilePath}`;
         console.log(s3Key);
         const command = new PutObjectCommand({
-            Bucket : "bolt-app",
+            Bucket : S3_BUCKET_NAME,
             Key : s3Key,
             ContentType : contentType,
             Body : fileContent

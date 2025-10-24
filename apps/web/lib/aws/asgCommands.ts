@@ -5,12 +5,13 @@ export const getASGInstances = async () => {
    
     const command = new DescribeAutoScalingGroupsCommand({
         AutoScalingGroupNames : [
-            "mycodeserver-asg"
+            "mycoderserver-asg"
         ]
     });
 
     const response = await asgClient.send(command);
     const allInstances = response.AutoScalingGroups?.[0]?.Instances || [];
+    console.log(allInstances);
     return allInstances;
 }
 

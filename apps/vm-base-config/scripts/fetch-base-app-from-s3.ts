@@ -6,7 +6,7 @@ import { promises as fs } from 'fs';
 
 // const ACCESS_KEY_ID=process.env.AWS_S3_USER_ACCESS_KEY as string;
 // const ACCESS_KEY_SECRET=process.env.AWS_S3_USER_SECRET_ACCESS as string;
-const S3_BUCKET_NAME="bolt-app";
+const S3_BUCKET_NAME="bolt-app-v2";
 
 // if (!ACCESS_KEY_ID || !ACCESS_KEY_SECRET || !S3_BUCKET_NAME) {
 //   throw new Error("AWS credentials are missing. Check your .env file.");

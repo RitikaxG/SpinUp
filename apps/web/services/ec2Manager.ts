@@ -74,7 +74,7 @@ export const vmBootingSetup = async (projectId : string, projectName : string, p
     }
     catch(err:unknown){
         if(err instanceof Error){
-            console.error(`Unable to start container inside instance ${instanceId}`);
+            console.error(`Unable to start container inside instance ${instanceId} ${err}`);
             await terminateAndScaleDown(instanceId,true); // rollback if container does not starts
             return;
         }

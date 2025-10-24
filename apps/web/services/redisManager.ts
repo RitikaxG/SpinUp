@@ -78,7 +78,7 @@ export const cleanUpInstanceInRedis = async (projectId : string) => {
 
         // 5. Delete object from bucket
         const objectKey = `projects/${instanceMetaData.projectName}_${projectId}/code-${instanceMetaData.projectType}`;
-        await deleteS3Object("bolt-app",objectKey);
+        await deleteS3Object("bolt-app-v2",objectKey);
 
         return `${instanceId} associated with ${projectId} successfully deleted`;
     }

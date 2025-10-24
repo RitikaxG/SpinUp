@@ -63,7 +63,8 @@ export default function LandingPage(){
 
   const deleteProject = async (projectId : string) => {
     try{
-      await axios.delete(`/api/project/?id=${projectId}`);
+      const deleted = await axios.delete(`/api/project/?id=${projectId}`);
+      console.log(deleted);
       removeProject(projectId);
     }
     catch(err : unknown){

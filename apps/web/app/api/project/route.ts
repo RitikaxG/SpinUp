@@ -90,52 +90,52 @@ export async function DELETE(req : NextRequest){
     }
 
     try{
-        // const user = await currentUser();
-        // if(!user){
-        //     return NextResponse.json({
-        //         message : `Unauthorized`
-        //     },{
-        //         status : 401
-        //     })
-        // }
+        const user = await currentUser();
+        if(!user){
+            return NextResponse.json({
+                message : `Unauthorized`
+            },{
+                status : 401
+            })
+        }
     
-        // const dbUser = await prisma.user.findFirst({
-        //     where : {
-        //         email : user?.emailAddresses[0]?.emailAddress
-        //     }
-        // })
+        const dbUser = await prisma.user.findFirst({
+            where : {
+                email : user?.emailAddresses[0]?.emailAddress
+            }
+        })
 
-        // if(!dbUser){
-        //     return NextResponse.json({
-        //         message : "User not found in database"
-        //     },{
-        //         status : 400
-        //     })
-        // }
-        // console.log(dbUser.id);
+        if(!dbUser){
+            return NextResponse.json({
+                message : "User not found in database"
+            },{
+                status : 400
+            })
+        }
+        console.log(dbUser.id);
     
-        // // Check if project belongs to dbUser
-        // const projectRoom = await prisma.projectRoom.findFirst({
-        //     where : {
-        //         userId : dbUser.id,
-        //         projectId
-        //     }
-        // })
+        // Check if project belongs to dbUser
+        const projectRoom = await prisma.projectRoom.findFirst({
+            where : {
+                userId : dbUser.id,
+                projectId
+            }
+        })
 
-        // if(!projectRoom){
-        //     return NextResponse.json({
-        //         message : "You do not have access to this project"
-        //     },{
-        //         status : 403
-        //     })
-        // }
+        if(!projectRoom){
+            return NextResponse.json({
+                message : "You do not have access to this project"
+            },{
+                status : 403
+            })
+        }
 
         // Delete all Project-User which was associated with `projectId
-        // await prisma.projectRoom.deleteMany({
-        //     where : {
-        //         projectId
-        //     }
-        // })
+        await prisma.projectRoom.deleteMany({
+            where : {
+                projectId
+            }
+        })
 
         await prisma.project.delete({
             where : { id : projectId }
@@ -161,57 +161,68 @@ export async function DELETE(req : NextRequest){
 }
 
 export async function GET(){
-    const user = await currentUser();
-    if(!user){
-        return NextResponse.json({
-            message : "Unauthorized"
-        },{
-            status : 401
-        })
-    }
+    // const user = await currentUser();
+    // if(!user){
+    //     return NextResponse.json({
+    //         message : "Unauthorized"
+    //     },{
+    //         status : 401
+    //     })
+    // }
 
-    const dbUser = await prisma.user.findFirst({
-        where : {
-            email : user.emailAddresses[0]?.emailAddress
-        }
-    })
+    // const dbUser = await prisma.user.findFirst({
+    //     where : {
+    //         email : user.emailAddresses[0]?.emailAddress
+    //     }
+    // })
 
-    if(!dbUser){
-        return NextResponse.json({
-            message : `User not found in DB`
-        },{
-            status : 403
-        })
-    }
+    // if(!dbUser){
+    //     return NextResponse.json({
+    //         message : `User not found in DB`
+    //     },{
+    //         status : 403
+    //     })
+    // }
 
+    // try{
+    //     const userProjects = await prisma.projectRoom.findMany({
+    //         where : {
+    //             userId : dbUser.id
+    //         },
+    //         select : {
+    //             projectId : true
+    //         }
+    //     })
+
+    //     const projectIds = userProjects.map((link) => link.projectId);
+
+    //     if(projectIds.length === 0){
+    //         return NextResponse.json({
+    //             message : `You have no associated projects`
+    //         },{
+    //             status : 400
+    //         })
+    //     }
+
+    //     const projects = await prisma.project.findMany({
+    //         where : {
+    //             id : { in : projectIds }
+    //         }
+    //     });
+
+    //     return NextResponse.json({
+    //         message : `Fetched all projects successfully`,
+    //         allProjects : projects
+    //     },{
+    //         status : 200
+    //     })
+    // }
     try{
-        const userProjects = await prisma.projectRoom.findMany({
-            where : {
-                userId : dbUser.id
-            },
-            select : {
-                projectId : true
-            }
-        })
-
-        const projectIds = userProjects.map((link) => link.projectId);
-
-        if(projectIds.length === 0){
-            return NextResponse.json({
-                message : `You have no associated projects`
-            },{
-                status : 400
-            })
-        }
-
-        const projects = await prisma.project.findMany({
-            where : {
-                id : { in : projectIds }
-            }
-        });
+        const projects = await prisma.project.findMany();
+        console.log(projects);
 
         return NextResponse.json({
-            message : `Fetched all projects successfully`,
+             message : `Fetched all projects successfully`,
             allProjects : projects
         },{
             status : 200
