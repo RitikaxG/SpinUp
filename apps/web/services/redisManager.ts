@@ -71,8 +71,8 @@ export const cleanUpInstanceInRedis = async (projectId : string) => {
 
         await redis.multi()
             .del(`instance:${instanceId}`)
-            .del(`user:${instanceMetaData.userId}`)
-            .del(`project:${projectId}`)
+            .del(`user:${instanceMetaData.userId}:instance`)
+            .del(`project:${projectId}:instance`)
             .exec();
 
 

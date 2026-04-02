@@ -3,9 +3,21 @@ import { prisma } from "db/client";
 import { currentUser } from "@clerk/nextjs/server";
 import { vmBootingSetup } from "../../../services/ec2Manager";
 import { cleanUpInstanceInRedis } from "../../../services/redisManager";
+import { createProjectSchema } from "../../../lib/validators/project";
 
 export async function POST(req : NextRequest){
     const data = await req.json();
+    const parsed = createProjectSchema.safeParse(data);
+
+    if(!parsed.success){
+        return NextResponse.json({
+            message : "Invalid input",
+            error : parsed.error.flatten().fieldErrors,
+        },{
+            status: 400
+        })
+    }
+
     const user = await currentUser();
 
     if (!user) {
@@ -161,73 +173,63 @@ export async function DELETE(req : NextRequest){
 }
 
 export async function GET(){
-    // const user = await currentUser();
-    // if(!user){
-    //     return NextResponse.json({
-    //         message : "Unauthorized"
-    //     },{
-    //         status : 401
-    //     })
-    // }
+    const user = await currentUser();
+    if(!user){
+        return NextResponse.json({
+            message : "Unauthorized"
+        },{
+            status : 401
+        })
+    }
 
-    // const dbUser = await prisma.user.findFirst({
-    //     where : {
-    //         email : user.emailAddresses[0]?.emailAddress
-    //     }
-    // })
+    const dbUser = await prisma.user.findFirst({
+        where : {
+            email : user.emailAddresses[0]?.emailAddress
+        }
+    })
 
-    // if(!dbUser){
-    //     return NextResponse.json({
-    //         message : `User not found in DB`
-    //     },{
-    //         status : 403
-    //     })
-    // }
+    if(!dbUser){
+        return NextResponse.json({
+            message : `User not found in DB`
+        },{
+            status : 403
+        })
+    }
 
-    // try{
-    //     const userProjects = await prisma.projectRoom.findMany({
-    //         where : {
-    //             userId : dbUser.id
-    //         },
-    //         select : {
-    //             projectId : true
-    //         }
-    //     })
-
-    //     const projectIds = userProjects.map((link) => link.projectId);
-
-    //     if(projectIds.length === 0){
-    //         return NextResponse.json({
-    //             message : `You have no associated projects`
-    //         },{
-    //             status : 400
-    //         })
-    //     }
-
-    //     const projects = await prisma.project.findMany({
-    //         where : {
-    //             id : { in : projectIds }
-    //         }
-    //     });
-
-    //     return NextResponse.json({
-    //         message : `Fetched all projects successfully`,
-    //         allProjects : projects
-    //     },{
-    //         status : 200
-    //     })
-    // }
     try{
-        const projects = await prisma.project.findMany();
-        console.log(projects);
+        const userProjects = await prisma.projectRoom.findMany({
+            where : {
+                userId : dbUser.id
+            },
+            select : {
+                projectId : true
+            }
+        })
+
+        const projectIds = userProjects.map((link) => link.projectId);
+
+        if(projectIds.length === 0){
+            return NextResponse.json({
+                message : `You have no associated projects`
+            },{
+                status : 400
+            })
+        }
+
+        const projects = await prisma.project.findMany({
+            where : {
+                id : { in : projectIds }
+            }
+        });
 
         return NextResponse.json({
-             message : `Fetched all projects successfully`,
+            message : `Fetched all projects successfully`,
             allProjects : projects
         },{
             status : 200
         })
     }
+
     catch(err : unknown){
         if(err instanceof Error){
             return NextResponse.json({
