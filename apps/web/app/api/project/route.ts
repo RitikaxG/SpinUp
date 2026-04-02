@@ -2,12 +2,52 @@ import { NextResponse, NextRequest } from "next/server";
 import { prisma } from "db/client";
 import { currentUser } from "@clerk/nextjs/server";
 import { vmBootingSetup } from "../../../services/ec2Manager";
-import { cleanUpInstanceInRedis } from "../../../services/redisManager";
-import { createProjectSchema } from "../../../lib/validators/project";
+import { cleanUpOwnedProjectInstance } from "../../../services/redisManager";
+import { ProjectSchema } from "../../../lib/validators/project";
+
+async function requireDBUser(){
+    const clerk = await currentUser();
+
+    if(!clerk){
+        return{
+            error : NextResponse.json({
+                error : "Unauthorised"
+            },{
+                status: 401
+            })
+        }
+    }
+
+    const dbUser = await prisma.user.findUnique({
+        where: {
+            clerkId: clerk.id
+        }
+    })
+
+    if(!dbUser){
+        return{
+            error: NextResponse.json({
+                error : "User not found"
+            },{
+                status: 404
+            })
+        }
+    }
+
+    return {
+        clerkUser : clerk,
+        dbUser
+    }
+}
 
 export async function POST(req : NextRequest){
-    const data = await req.json();
-    const parsed = createProjectSchema.safeParse(data);
+    const auth = await requireDBUser();
+    if("error" in auth){
+        return auth.error;
+    }
+
+    const body = await req.json();
+    const parsed = ProjectSchema.safeParse(body);
 
     if(!parsed.success){
         return NextResponse.json({
@@ -18,43 +58,27 @@ export async function POST(req : NextRequest){
         })
     }
 
-    const user = await currentUser();
-
-    if (!user) {
-        return new Response("Unauthorized", { status: 401 });
-    }
-
-  const currentClerkEmail = user.emailAddresses[0]?.emailAddress;
-  console.log(currentClerkEmail);
-
-  let existingUser = await prisma.user.findFirst({
-    where : {
-        email : currentClerkEmail
-    }
-  })
-
-  const email = user.emailAddresses[0]?.emailAddress || "";
-  const name = `${user.firstName || ' '} ${user.lastName || ' '}`.trim();
-  const provider = user.externalAccounts?.[0]?.provider || null;
-
-  
-  if(!existingUser){
-    existingUser = await prisma.user.create({
-        data : {
-            clerkId : user.id,
-            email,
-            name,
-            profileImageUrl : user.imageUrl,
-            provider,
+    const existingProject = await prisma.project.findFirst({
+        where : {
+            ownerId : auth.dbUser.id,
+            name: parsed.data.name
         }
     })
-  }
+
+    if(existingProject){
+        return NextResponse.json({
+            error : "You already have a project with this name",
+        },{
+            status : 409
+        })
+    }
 
     try{
          const newProject = await prisma.project.create({
             data : {
-                name : data.name,
-                type : data.type
+                name : parsed.data.name,
+                type : parsed.data.type,
+                ownerId: auth.dbUser.id,
             }
         })
 
@@ -63,12 +87,12 @@ export async function POST(req : NextRequest){
         // Associate User-Project {userId, projectId}
         await prisma.projectRoom.create({
             data : {
-                userId : existingUser!.id,
+                userId : auth.dbUser.id,
                 projectId : newProject.id
                 }
             })
         
-        const userId = existingUser.id;
+        const userId = auth.dbUser.id;
         const bootingEvents = await vmBootingSetup(newProject.id,newProject.name, newProject.type, userId);
        
 
@@ -90,9 +114,16 @@ export async function POST(req : NextRequest){
 }
 
 export async function DELETE(req : NextRequest){
+    const auth = await requireDBUser();
+    if("error" in auth){
+        return auth.error;
+    }
+
     const { searchParams } = new URL(req.url);
     const projectId = searchParams.get("id");
+
     console.log(projectId);
+
     if(!projectId){
         return NextResponse.json({
             message : `ProjectId not provided`
@@ -102,39 +133,15 @@ export async function DELETE(req : NextRequest){
     }
 
     try{
-        const user = await currentUser();
-        if(!user){
-            return NextResponse.json({
-                message : `Unauthorized`
-            },{
-                status : 401
-            })
-        }
-    
-        const dbUser = await prisma.user.findFirst({
-            where : {
-                email : user?.emailAddresses[0]?.emailAddress
-            }
-        })
-
-        if(!dbUser){
-            return NextResponse.json({
-                message : "User not found in database"
-            },{
-                status : 400
-            })
-        }
-        console.log(dbUser.id);
-    
         // Check if project belongs to dbUser
-        const projectRoom = await prisma.projectRoom.findFirst({
+        const ownedProject = await prisma.project.findFirst({
             where : {
-                userId : dbUser.id,
-                projectId
+                ownerId : auth.dbUser.id,
+                id : projectId
             }
         })
 
-        if(!projectRoom){
+        if(!ownedProject){
             return NextResponse.json({
                 message : "You do not have access to this project"
             },{
@@ -142,19 +149,20 @@ export async function DELETE(req : NextRequest){
             })
         }
 
-        // Delete all Project-User which was associated with `projectId
+        // Clean up any instance in redis associated with the projectId
+        await cleanUpOwnedProjectInstance(projectId, auth.dbUser.id);
+
+        // Delete all Project-User which was associated with `projectId`
         await prisma.projectRoom.deleteMany({
             where : {
                 projectId
             }
         })
 
+        // Delete the project
         await prisma.project.delete({
             where : { id : projectId }
         })
-
-        
-        await cleanUpInstanceInRedis(projectId);
 
         return NextResponse.json({
             message : `Successfully deleted project with id ${projectId}`
@@ -173,52 +181,19 @@ export async function DELETE(req : NextRequest){
 }
 
 export async function GET(){
-    const user = await currentUser();
-    if(!user){
-        return NextResponse.json({
-            message : "Unauthorized"
-        },{
-            status : 401
-        })
-    }
-
-    const dbUser = await prisma.user.findFirst({
-        where : {
-            email : user.emailAddresses[0]?.emailAddress
-        }
-    })
-
-    if(!dbUser){
-        return NextResponse.json({
-            message : `User not found in DB`
-        },{
-            status : 403
-        })
+    const auth = await requireDBUser();
+    if ("error" in auth) {
+        return auth.error;
     }
 
     try{
-        const userProjects = await prisma.projectRoom.findMany({
-            where : {
-                userId : dbUser.id
-            },
-            select : {
-                projectId : true
-            }
-        })
-
-        const projectIds = userProjects.map((link) => link.projectId);
-
-        if(projectIds.length === 0){
-            return NextResponse.json({
-                message : `You have no associated projects`
-            },{
-                status : 400
-            })
-        }
 
         const projects = await prisma.project.findMany({
             where : {
-                id : { in : projectIds }
+                ownerId: auth.dbUser.id
+            },
+            orderBy: {
+                id: "desc"
             }
         });
 

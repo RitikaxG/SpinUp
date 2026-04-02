@@ -1,16 +1,28 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Get a free hosted Postgres database in seconds: `npx create-db`
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+}
+
+enum VmState {
+  STOPPED
+  BOOTING
+  RUNNING
+  FAILED
+  TERMINATING
+}
+enum ProjectType {
+  NEXTJS
+  REACT
+  REACT_NATIVE
 }
 
 // 1 User => Many Projects
@@ -24,19 +36,32 @@ model User{
   providerUserId   String?
   createdAt       DateTime @default(now())
 
-  projects        ProjectRoom[]
+  // Projects this user owns
+  ownedProjects Project[] @relation("ProjectOwner")
+
+  // Projects this user is a member of
+  projectRooms        ProjectRoom[]
 }
 
 // 1 Project => Many Users ( Devs )
 model Project {
   id        String   @id @default(cuid())
-  name      String   @unique
-  type      String
+  name      String   
+  type      ProjectType
+  ownerId   String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
- 
+  // Actual owner of the project
+  owner User @relation("ProjectOwner",fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // Members
   members   ProjectRoom[]
+
+  // Same user cannot create 2 projects with same name
+  @@unique([ownerId,name],name:"ownerId_name")
+
+  @@index([ownerId])
 }
 
 // Each User-Project link is stored here
@@ -46,8 +71,15 @@ model ProjectRoom {
   userId   String
   joinedAt DateTime @default(now())
 
+  vmState VmState @default(STOPPED)
+
   user    User @relation(fields: [userId], references: [id])
   project    Project @relation(fields: [projectId], references: [id])
 
   @@unique([userId,projectId], name : "userId_projectId")
+  @@index([projectId])
+  @@index([userId])
 }
+
+// Project.ownerId - who controls lifecycle
+// ProjectRoom - who is allowed to collaborate/access
