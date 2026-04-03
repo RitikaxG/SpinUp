@@ -1,6 +1,6 @@
 import { getASGInstances, setDesiredCapacity, getDesiredCapacity, terminateAndScaleDown } from "../lib/aws/asgCommands"
 import { InstanceStatus, getInstance, deleteInstanceLifecycle } from "./redisManager";
-
+import { prisma } from "db/client";
 
 interface InstanceInfo {
     InstanceId? : string;
@@ -82,20 +82,48 @@ export const checkAndScaleUp = async () => {
     }
 };
 
-export const terminatingUnhealthyInstances = async() => {
-    const unhealthyInstances = await getUnhealthyInstances();
-     for ( const instance of unhealthyInstances ){
-        
-        if(!instance.InstanceId){
-            continue;
-        }
+export const terminatingUnhealthyInstances = async () => {
+  const unhealthyInstances = await getUnhealthyInstances();
 
-        console.log(`Terminating unhealthy instance ${instance.InstanceId}`);
-
-        await terminateAndScaleDown(instance.InstanceId!, false);
-        await deleteInstanceLifecycle(instance.InstanceId)
+  for (const instance of unhealthyInstances) {
+    if (!instance.InstanceId) {
+      continue;
     }
-}
+
+    const instanceId = instance.InstanceId;
+    const redisRecord = await getInstance(instanceId);
+
+    try {
+      // 1) Reflect failure in DB if this unhealthy instance was assigned
+      if (redisRecord?.projectId && redisRecord?.userId) {
+        await prisma.projectRoom.updateMany({
+          where: {
+            projectId: redisRecord.projectId,
+            userId: redisRecord.userId,
+          },
+          data: {
+            vmState: "FAILED",
+          },
+        });
+      }
+
+      // 2) Terminate unhealthy EC2 instance
+      console.log(`Terminating unhealthy instance ${instanceId}`);
+      await terminateAndScaleDown(instanceId, false);
+
+      // 3) Remove stale Redis lifecycle
+      await deleteInstanceLifecycle(instanceId);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        console.error(
+          `Failed unhealthy-instance cleanup for ${instanceId}: ${err.message}`
+        );
+      } else {
+        console.error(`Failed unhealthy-instance cleanup for ${instanceId}`);
+      }
+    }
+  }
+};
 
 const idleMachines = await getIdleMachines();
 console.log(idleMachines);
