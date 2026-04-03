@@ -18,6 +18,7 @@ enum VmState {
   RUNNING
   FAILED
   TERMINATING
+  IDLE
 }
 enum ProjectType {
   NEXTJS
