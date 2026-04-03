@@ -1,7 +1,7 @@
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
 import { checkAndScaleUp, getIdleMachines } from "./asgManager"
-import { cleanUpOwnedProjectInstance, markInstanceInUse, redis } from "./redisManager";
+import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
 
@@ -65,46 +65,107 @@ export const vmBootingSetup = async (
     await updateVmState(projectId, ownerId, "BOOTING");
     try{
         // 1. Check if that user already have a VM assigned ( this will return it's ID )
-        const exisitingVmId = await redis.get(`user:${ownerId}:instance`);
+        const existingProjectVmId = await getInstanceIdForProject(projectId);
 
-        if(exisitingVmId){
-            const existingVmMetaData = await redis.hgetall(`instance:${exisitingVmId}`);
+        if(existingProjectVmId){
+            const existingProjectVm = await getInstance(existingProjectVmId);
 
-            if(!existingVmMetaData || Object.keys(existingVmMetaData).length === 0){
-                await redis.del(`user:${ownerId}:instance`);
-            }
-            else if(!existingVmMetaData.projectId){
-                await redis.multi()
-                    .del(`user:${ownerId}:instance`)
-                    .del(`instance:${exisitingVmId}`)
-                    .exec()
+            if(!existingProjectVm){
+                await deleteInstanceMappings({
+                    projectId,
+                })
+                await deleteInstanceRecord(existingProjectVmId);
             }
             else if(
-                existingVmMetaData.projectId === projectId &&
-                existingVmMetaData.publicIP &&
-                existingVmMetaData.containerName
+                existingProjectVm.userId === ownerId &&
+                existingProjectVm.projectId === projectId &&
+                existingProjectVm.publicIP &&
+                existingProjectVm.containerName &&
+                existingProjectVm.status === "RUNNING"
             ){
+                await writeRunningInstance({
+                    instanceId: existingProjectVm.instanceId,
+                    userId: existingProjectVm.userId,
+                    projectId: existingProjectVm.projectId,
+                    projectName: existingProjectVm.projectName ?? projectName,
+                    projectType: existingProjectVm.projectType as ProjectTypeValue ?? projectType,
+                    publicIP: existingProjectVm.publicIP,
+                    containerName: existingProjectVm.containerName
+                })
+
                 await updateVmState(projectId, ownerId, "RUNNING");
+            
+            
                 return{
                     userId : ownerId,
-                    instanceId: exisitingVmId,
-                    publicIP: existingVmMetaData.publicIP,
+                    instanceId: existingProjectVm.instanceId,
+                    publicIP: existingProjectVm.publicIP,
                     projectId,
-                    projectName: existingVmMetaData.projectName ?? projectName,
-                    projectType: existingVmMetaData.projectType as ProjectTypeValue ?? projectType,
-                    containerName: existingVmMetaData.containerName
+                    projectName: existingProjectVm.projectName ?? projectName,
+                    projectType: existingProjectVm.projectType as ProjectTypeValue ?? projectType,
+                    containerName: existingProjectVm.containerName
                 }
             }
             else{
-                await cleanUpOwnedProjectInstance(existingVmMetaData.projectId, ownerId);
+                await cleanUpOwnedProjectInstance(projectId, ownerId);
+            }
+        }
+
+        // Check if user is mapped to some other instance
+        const existingUserVmId = await getInstanceIdForUser(ownerId);
+        if(existingUserVmId){
+            const existingUserVm = await getInstance(existingUserVmId);
+
+            if(!existingUserVm){
+                await deleteInstanceMappings({
+                    userId: ownerId,
+                })
+                await deleteInstanceRecord(existingUserVmId);
+            }
+            else if(
+                existingUserVm.projectId === projectId &&
+                existingUserVm.publicIP &&
+                existingUserVm.containerName &&
+                existingUserVm.status === "RUNNING"
+            ){
+                // Heal project mapping if user mapping exists but project mapping is stale
+                await writeRunningInstance({
+                    instanceId: existingUserVm.instanceId,
+                    userId: existingUserVm.userId,
+                    projectId: existingUserVm.projectId,
+                    projectName: existingUserVm.projectName ?? projectName,
+                    projectType: existingUserVm.projectType as ProjectTypeValue ?? projectType,
+                    publicIP: existingUserVm.publicIP,
+                    containerName: existingUserVm.containerName
+                })
+
+                await updateVmState(projectId, ownerId, "RUNNING");
+
+                return{
+                    userId : ownerId,
+                    instanceId: existingUserVm.instanceId,
+                    publicIP: existingUserVm.publicIP,
+                    projectId: existingUserVm.projectId,
+                    projectName: existingUserVm.projectName ?? projectName,
+                    projectType: existingUserVm.projectType as ProjectTypeValue ?? projectType,
+                    containerName: existingUserVm.containerName
+                }
+            }
+            else if(existingUserVm.projectId){
+                await cleanUpOwnedProjectInstance(existingUserVm.projectId, ownerId);
+            }
+            else{
+                await deleteInstanceMappings({projectId});
+                await deleteInstanceRecord(existingUserVm.instanceId);
             }
         }
         
-        // 2. Get an idle instance
+        
+        // 2. Get a fresh idle instance
         const allocation = await allocateVmAndScaleUp();
 
         if(!allocation.instanceId){
-            updateVmState(projectId, ownerId, "FAILED")
+            await updateVmState(projectId, ownerId, "FAILED")
             return null;
         }
 
@@ -119,9 +180,17 @@ export const vmBootingSetup = async (
             return null;
         }
 
+        await writeBootingInstance({
+            instanceId,
+            userId: ownerId,
+            projectId,
+            projectName,
+            projectType,
+            publicIP,
+        })
         
         // 4. Start my-code-server container inside VM
-        let containerName;
+        let containerName: string;
         try{
             const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
                 projectId, 
@@ -139,16 +208,22 @@ export const vmBootingSetup = async (
                 console.error(`Unable to start container inside instance ${instanceId} ${err.message}`);
             }
             await terminateAndScaleDown(instanceId,true); // rollback if container does not starts
+            await deleteInstanceLifecycle(instanceId);
             await updateVmState(projectId,ownerId,"FAILED")
             return null;
         }
-        
-        
-        console.log(containerName);
 
-        // 5. Mark instance:${instanceId} key in redis
-        await markInstanceInUse(ownerId, instanceId, projectId, projectName, projectType, publicIP, containerName);
-    
+        // Promote BOOTING -> RUNNING
+        await writeRunningInstance({
+            instanceId,
+            userId: ownerId,
+            projectId,
+            projectName,
+            projectType,
+            publicIP,
+            containerName
+        })
+        
         await updateVmState(projectId, ownerId, "RUNNING");
 
         return {
@@ -162,7 +237,7 @@ export const vmBootingSetup = async (
         }
     }
     catch(err){
-        updateVmState(projectId, ownerId, "FAILED");
+        await updateVmState(projectId, ownerId, "FAILED");
         throw err;
     }
 }
@@ -172,18 +247,50 @@ export const heartBeat = async () => {
     const instances = await redis.keys("instance:*");
     console.log(`Heartbeat check for ${instances.length} instances...`);
 
-    for(const instance of instances){
-        const instanceMetaData = await redis.hgetall(instance);
+    for(const instanceKey of instances){
+        const instanceId = instanceKey.split(":")[1];
+
+        if (!instanceId) {
+        continue;
+        }
+        const instanceMetaData = await getInstance(instanceId);
+        if(!instanceMetaData){
+            await deleteInstanceRecord(instanceId);
+            continue;
+        }
+
+        // Only actively running allocations need container/health checks
+        if (instanceMetaData.status !== "RUNNING") {
+        continue;
+        }
 
         const containerName = instanceMetaData.containerName;
         const publicIP      = instanceMetaData.publicIP;
         const projectId     = instanceMetaData.projectId;
-        const instanceId    = instanceMetaData.instanceId;
 
         if(!containerName || !publicIP || !projectId || !instanceId){
-            console.error(`Skipping ${instance} : missing data in redis`);
+            console.error(`Skipping ${instanceId} : missing data in redis`);
+
+            if (projectId) {
+                const project = await prisma.project.findUnique({
+                where: { id: projectId },
+                select: { ownerId: true },
+                });
+
+                if (project) {
+                await cleanUpOwnedProjectInstance(projectId, project.ownerId);
+                } else {
+                await deleteInstanceLifecycle(instanceId);
+                }
+            } 
+            
+            else {
+                await deleteInstanceLifecycle(instanceId);
+            }
+
             continue;
         }
+
 
         let shouldTerminate = false;
         // Check container status
@@ -209,7 +316,9 @@ export const heartBeat = async () => {
         
         // Heath Check
         try{
-            const healthCheck = await axios.get(`http://${publicIP}:3000/health`);
+            const healthCheck = await axios.get(`http://${publicIP}:3000/health`,{
+                timeout : 5000
+            });
             if(healthCheck.data !== "OK"){
                 console.error(`Heath check failed for ${instanceId}`);
                 shouldTerminate = true
@@ -236,10 +345,14 @@ export const heartBeat = async () => {
 
             if(!project){
                 console.error(`Skipping cleanup for projectId ${projectId} project not found in DB`);
+                await deleteInstanceLifecycle(instanceId);
                 continue;
             }
             await cleanUpOwnedProjectInstance(projectId, project.ownerId);
+            continue;
         }  
+
+        await updateInstanceHeartbeat(instanceId);
     }
 }
 
