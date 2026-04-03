@@ -1,32 +1,44 @@
 import { getASGInstances, setDesiredCapacity, getDesiredCapacity, terminateAndScaleDown } from "../lib/aws/asgCommands"
-import { getPublicIP } from "../lib/aws/ec2Commands";
-import { redis } from "./redisManager";
+import { InstanceStatus, getInstance, deleteInstanceLifecycle } from "./redisManager";
 
 
-interface Instance {
+interface InstanceInfo {
     InstanceId? : string;
     LifecycleState? : string;
     HealthStatus? : string;
     inUse? : boolean; 
+    status? : InstanceStatus | "UNTRACKED"
 }
 
 const THRESHOLD_IDLE_MACHINE_COUNT = 5;
 
 
-export const getAllInstancesInfo = async () : Promise<Instance[]> => {
+export const getAllInstancesInfo = async () : Promise<InstanceInfo[]> => {
     const instances = await getASGInstances();
 
     const instanceDetails = await Promise.all(
-        instances.map(async (instance) => {
-        const publicIP  = await getPublicIP(instance.InstanceId!);
-        const redisData = await redis.hgetall(`instance:${instance.InstanceId}`)
-            return {
-            InstanceId : instance.InstanceId,
+        instances.map(async (instance): Promise<InstanceInfo> => {
+
+        const instanceId = instance.InstanceId;
+        if(!instanceId){
+            return{
+                InstanceId: undefined,
+                LifecycleState: instance.LifecycleState,
+                HealthStatus: instance.HealthStatus,
+                inUse: false,
+                status: "UNTRACKED"
+            }
+        }
+
+        const redisRecord = await getInstance(instanceId);
+    
+        return {
+            InstanceId : instanceId,
             LifecycleState : instance.LifecycleState,
             HealthStatus : instance.HealthStatus,
-            inUse : redisData.inUse === "true" ? true : false,
-            publicIp : publicIP
-            }
+            inUse : redisRecord ? redisRecord.inUse === "true" : false,
+            status: redisRecord?.status ?? "UNTRACKED"
+        }
         })
     ) 
     console.log(instanceDetails);
@@ -35,19 +47,25 @@ export const getAllInstancesInfo = async () : Promise<Instance[]> => {
 
 export const getReadyInstances = async () => {
     const instances = await getAllInstancesInfo();
-    const activeInstances = instances.filter(instance => instance.HealthStatus === "Healthy" && instance.LifecycleState === "InService");
-    return activeInstances;
+    return instances.filter((instance) => instance.HealthStatus === "Healthy" && instance.LifecycleState === "InService");
 }
 
 export const getUnhealthyInstances = async () => {
     const instances = await getAllInstancesInfo();
-    const unhealthyInstances = instances.filter((instance) => instance.HealthStatus === "Unhealthy");
-    return unhealthyInstances;
+    return instances.filter((instance) => instance.HealthStatus === "Unhealthy");
 }
 
 export const getIdleMachines = async () => {
     const instances = await getAllInstancesInfo();
-    const idleMachines = instances.filter((instance) => instance.HealthStatus === "Healthy" && instance.LifecycleState === "InService" && instance.inUse === false)
+
+    const idleMachines = instances.filter((instance) => {
+    const isHealthy = instance.HealthStatus === "Healthy";
+    const isInService = instance.LifecycleState === "InService";
+    const isIdle =
+      instance.status === "IDLE" || instance.status === "UNTRACKED";
+
+    return isHealthy && isInService && isIdle;
+    });
     return idleMachines;
 }
 
@@ -67,8 +85,15 @@ export const checkAndScaleUp = async () => {
 export const terminatingUnhealthyInstances = async() => {
     const unhealthyInstances = await getUnhealthyInstances();
      for ( const instance of unhealthyInstances ){
-        console.log(`Terminating unhealthy instance ${instance.InstanceId}`)
+        
+        if(!instance.InstanceId){
+            continue;
+        }
+
+        console.log(`Terminating unhealthy instance ${instance.InstanceId}`);
+
         await terminateAndScaleDown(instance.InstanceId!, false);
+        await deleteInstanceLifecycle(instance.InstanceId)
     }
 }
 
