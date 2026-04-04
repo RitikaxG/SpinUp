@@ -4,6 +4,7 @@ import { checkAndScaleUp, getIdleMachines } from "./asgManager"
 import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
+import { markProjectAllocating, markProjectBooting, markProjectFailed, markProjectReady, touchProjectHeartbeat } from "./projectLifecycleManager";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -11,7 +12,7 @@ const POLL_INTERVAL = 5000;
 type ProjectTypeValue = "NEXTJS"| "REACT" | "REACT_NATIVE"
 type VmStateValue = "RUNNING" | "STOPPED" | "FAILED" | "TERMINATING" | "BOOTING"
 
-const updateVmState = async (
+const updateProjectRoomVmState = async (
     projectId : string,
     userId : string,
     vmState : VmStateValue
@@ -62,7 +63,8 @@ export const vmBootingSetup = async (
     ownerId : string
 ) => {
 
-    await updateVmState(projectId, ownerId, "BOOTING");
+    await updateProjectRoomVmState(projectId, ownerId, "BOOTING");
+    await markProjectAllocating(projectId);
     try{
         // 1. Check if that user already have a VM assigned ( this will return it's ID )
         const existingProjectVmId = await getInstanceIdForProject(projectId);
@@ -93,7 +95,13 @@ export const vmBootingSetup = async (
                     containerName: existingProjectVm.containerName
                 })
 
-                await updateVmState(projectId, ownerId, "RUNNING");
+                await markProjectReady(projectId,{
+                    instanceId: existingProjectVm.instanceId,
+                    publicIp: existingProjectVm.publicIP,
+                    containerName: existingProjectVm.containerName,
+                    bootCompletedAt: new Date(),
+                })
+                await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
             
             
                 return{
@@ -139,7 +147,13 @@ export const vmBootingSetup = async (
                     containerName: existingUserVm.containerName
                 })
 
-                await updateVmState(projectId, ownerId, "RUNNING");
+                await markProjectReady(projectId,{
+                    instanceId: existingUserVm.instanceId,
+                    publicIp: existingUserVm.publicIP,
+                    containerName: existingUserVm.containerName,
+                    bootCompletedAt: new Date(),
+                })
+                await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
 
                 return{
                     userId : ownerId,
@@ -165,7 +179,8 @@ export const vmBootingSetup = async (
         const allocation = await allocateVmAndScaleUp();
 
         if(!allocation.instanceId){
-            await updateVmState(projectId, ownerId, "FAILED")
+            await updateProjectRoomVmState(projectId, ownerId, "FAILED");
+            await markProjectFailed(projectId,"No idle machine available within wait timeout");
             return null;
         }
 
@@ -176,7 +191,7 @@ export const vmBootingSetup = async (
         if(!publicIP){
             console.error(`Failed to fetch public IP for instance ${instanceId}`);
             await terminateAndScaleDown(instanceId,true); // rollback
-            await updateVmState(projectId,ownerId,"FAILED")
+            await updateProjectRoomVmState(projectId,ownerId,"FAILED")
             return null;
         }
 
@@ -192,6 +207,14 @@ export const vmBootingSetup = async (
         // 4. Start my-code-server container inside VM
         let containerName: string;
         try{
+            const bootStartedAt = new Date();
+
+            await markProjectBooting(projectId,{
+                instanceId,
+                publicIp: publicIP,
+                bootStartedAt,
+            })
+
             const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
                 projectId, 
                 projectName, 
@@ -209,7 +232,14 @@ export const vmBootingSetup = async (
             }
             await terminateAndScaleDown(instanceId,true); // rollback if container does not starts
             await deleteInstanceLifecycle(instanceId);
-            await updateVmState(projectId,ownerId,"FAILED")
+
+            await updateProjectRoomVmState(projectId,ownerId,"FAILED");
+            await markProjectFailed(projectId,
+                `Unable to start container inside instance ${instanceId} ${err instanceof Error ? err.message : "Unknown error"}`
+            ,{
+                assignedInstanceId: instanceId,
+                publicIp: publicIP,
+            })
             return null;
         }
 
@@ -224,7 +254,13 @@ export const vmBootingSetup = async (
             containerName
         })
         
-        await updateVmState(projectId, ownerId, "RUNNING");
+        await markProjectReady(projectId,{
+            instanceId,
+            publicIp: publicIP,
+            containerName,
+            bootCompletedAt: new Date(),
+        })
+        await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
 
         return {
             userId: ownerId,
@@ -237,7 +273,11 @@ export const vmBootingSetup = async (
         }
     }
     catch(err){
-        await updateVmState(projectId, ownerId, "FAILED");
+        await updateProjectRoomVmState(projectId, ownerId, "FAILED");
+        await markProjectFailed(
+            projectId,
+            err instanceof Error ? err.message : "Unknown VM booting error",
+        );
         throw err;
     }
 }
@@ -348,11 +388,18 @@ export const heartBeat = async () => {
                 await deleteInstanceLifecycle(instanceId);
                 continue;
             }
+            await markProjectFailed(projectId,"Heartbeat recovery cleanup triggered",{
+                assignedInstanceId: null,
+                containerName: null,
+                publicIp: null,
+                lastHeartbeatAt: null
+            })
             await cleanUpOwnedProjectInstance(projectId, project.ownerId);
             continue;
         }  
 
         await updateInstanceHeartbeat(instanceId);
+        await touchProjectHeartbeat(projectId);
     }
 }
 
