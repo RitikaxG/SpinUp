@@ -20,6 +20,17 @@ enum VmState {
   TERMINATING
   IDLE
 }
+
+enum ProjectLifecycleStatus {
+  CREATED
+  ALLOCATING_VM
+  BOOTING_CONTAINER
+  READY
+  FAILED
+  DELETING
+  DELETED
+}
+
 enum ProjectType {
   NEXTJS
   REACT
@@ -53,6 +64,19 @@ model Project {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  status ProjectLifecycleStatus @default(CREATED)
+  statusReason String?
+  assignedInstanceId String?
+  containerName String?
+  publicIp String?
+  bootStartedAt DateTime?
+  bootCompletedAt DateTime?
+  lastHeartbeatAt DateTime?
+  cleanupStartedAt DateTime?
+  cleanupCompletedAt DateTime?
+  deletedAt DateTime?
+
+
   // Actual owner of the project
   owner User @relation("ProjectOwner",fields: [ownerId], references: [id], onDelete: Cascade)
 
@@ -60,9 +84,10 @@ model Project {
   members   ProjectRoom[]
 
   // Same user cannot create 2 projects with same name
-  @@unique([ownerId,name],name:"ownerId_name")
-
+  @@index([ownerId,name])
   @@index([ownerId])
+  @@index([status])
+  @@index([ownerId,status])
 }
 
 // Each User-Project link is stored here
