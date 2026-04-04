@@ -1,4 +1,5 @@
 import { getASGInstances, setDesiredCapacity, getDesiredCapacity, terminateAndScaleDown } from "../lib/aws/asgCommands"
+import { markProjectFailed } from "./projectLifecycleManager";
 import { InstanceStatus, getInstance, deleteInstanceLifecycle } from "./redisManager";
 import { prisma } from "db/client";
 
@@ -105,6 +106,15 @@ export const terminatingUnhealthyInstances = async () => {
             vmState: "FAILED",
           },
         });
+
+        await markProjectFailed(redisRecord.projectId,
+            "ASG instance became unhealthy",{
+                assignedInstanceId: null,
+                containerName: null,
+                publicIp: null,
+                lastHeartbeatAt: null
+            }
+        )
       }
 
       // 2) Terminate unhealthy EC2 instance
