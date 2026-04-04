@@ -4,6 +4,7 @@ import { currentUser } from "@clerk/nextjs/server";
 import { vmBootingSetup } from "../../../services/ec2Manager";
 import { cleanUpOwnedProjectInstance } from "../../../services/redisManager";
 import { ProjectSchema } from "../../../lib/validators/project";
+import { markProjectAllocating, markProjectCreated, markProjectDeleting } from "../../../services/projectLifecycleManager";
 
 async function requireDBUser(){
     const clerk = await currentUser();
@@ -61,7 +62,8 @@ export async function POST(req : NextRequest){
     const existingProject = await prisma.project.findFirst({
         where : {
             ownerId : auth.dbUser.id,
-            name: parsed.data.name
+            name: parsed.data.name,
+            deletedAt: null
         }
     })
 
@@ -79,6 +81,7 @@ export async function POST(req : NextRequest){
                 name : parsed.data.name,
                 type : parsed.data.type,
                 ownerId: auth.dbUser.id,
+                status:"CREATED"
             }
         })
 
@@ -90,15 +93,36 @@ export async function POST(req : NextRequest){
                 userId : auth.dbUser.id,
                 projectId : newProject.id
                 }
-            })
+        })
+
+        await markProjectCreated(newProject.id);
+        await markProjectAllocating(newProject.id);
+
         
         const userId = auth.dbUser.id;
-        const bootingEvents = await vmBootingSetup(newProject.id,newProject.name, newProject.type, userId);
+        const bootResult = await vmBootingSetup(newProject.id,newProject.name, newProject.type, userId);
+
+        const projectSnapshot = await prisma.project.findUnique({
+            where: { id: newProject.id }
+        })
+
+        if(!bootResult){
+            return NextResponse.json({
+                message: "Project created but runtime boot failed",
+                project: projectSnapshot
+            },{
+                status: 500
+            })
+        }
        
 
         return NextResponse.json(
-            { message: "Project Created Successfully and linked to ProjectRoom", projectDetails : { projectId : newProject.id, projectName : newProject.name, projectType : newProject.type }, bootingEventsLog : bootingEvents } ,
-            { status :  200 },
+            { 
+                message: "Project created and runtime ready", 
+                project : projectSnapshot,
+                runtime: bootResult
+        } ,
+            { status :  201 },
 
         )
     }
@@ -138,6 +162,11 @@ export async function DELETE(req : NextRequest){
             where : {
                 ownerId : auth.dbUser.id,
                 id : projectId
+            },
+            select: {
+                id: true,
+                status: true,
+                deletedAt: true
             }
         })
 
@@ -149,23 +178,21 @@ export async function DELETE(req : NextRequest){
             })
         }
 
+        if(ownedProject.status === "DELETED"){
+            return NextResponse.json({
+                message : `Project with id ${projectId} is already deleted`
+            },{
+                status : 200
+            })
+        }
+
+        await markProjectDeleting(projectId);
+
         // Clean up any instance in redis associated with the projectId
-        await cleanUpOwnedProjectInstance(projectId, auth.dbUser.id);
-
-        // Delete all Project-User which was associated with `projectId`
-        await prisma.projectRoom.deleteMany({
-            where : {
-                projectId
-            }
-        })
-
-        // Delete the project
-        await prisma.project.delete({
-            where : { id : projectId }
-        })
+        const cleanupMessage = await cleanUpOwnedProjectInstance(projectId, auth.dbUser.id);
 
         return NextResponse.json({
-            message : `Successfully deleted project with id ${projectId}`
+            message : cleanupMessage
         },{
             status : 200
         })
@@ -190,7 +217,8 @@ export async function GET(){
 
         const projects = await prisma.project.findMany({
             where : {
-                ownerId: auth.dbUser.id
+                ownerId: auth.dbUser.id,
+                deletedAt: null
             },
             orderBy: {
                 id: "desc"
