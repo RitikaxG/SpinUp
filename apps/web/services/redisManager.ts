@@ -4,6 +4,7 @@ import axios from "axios";
 import { deleteS3Object } from "../lib/aws/s3Commands";
 const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
+import { markProjectDeleted, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");
@@ -108,8 +109,8 @@ export const writeBootingInstance = async ({
 
     await redis.multi()
         .hset(redisKeys.instance(instanceId),record) // full instance metadata
-        .hset(redisKeys.userInstance(userId),instanceId) // user-instance mapping
-        .hset(redisKeys.projectInstance(projectId),instanceId) // project-instance mapping
+        .set(redisKeys.userInstance(userId),instanceId) // user-instance mapping
+        .set(redisKeys.projectInstance(projectId),instanceId) // project-instance mapping
         .exec();
 
     return record;
@@ -150,8 +151,8 @@ export const writeRunningInstance = async({
 
     await redis.multi()
         .hset(redisKeys.instance(instanceId),record)
-        .hset(redisKeys.userInstance(userId),instanceId)
-        .hset(redisKeys.projectInstance(projectId),record)
+        .set(redisKeys.userInstance(userId),instanceId)
+        .set(redisKeys.projectInstance(projectId),instanceId)
         .exec()
 
     return record;
@@ -279,98 +280,25 @@ export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : 
             throw new Error("Forbidden cleanup attempt : User does not own the project");
         }
 
-        // Update vmState to TERMINATING for the user in that projectRoom
-        await prisma.projectRoom.updateMany({
-            where: {
-                projectId,
-                userId: ownerId
-            },
-            data: {
-                vmState: "TERMINATING"
-            }
-        })
+        await markProjectDeleting(projectId);
 
-        // Get instanceId associated with that project
-       const instanceId = await getInstanceIdForProject(projectId);
+        const runtimeCleanupMessage = await cleanupProjectRuntimeAssignment(projectId, ownerId);
 
-       if(!instanceId){
-
-        await prisma.projectRoom.updateMany({
-            where: {
-                projectId,
-                userId: ownerId
-            },
-            data:{
-                vmState: "STOPPED"
-            }
-        })
-
-        return `No active instance for project ${projectId}`;
-       }
-
-       const instanceMetaData = await getInstance(instanceId);
-       if(!instanceMetaData){
-
-        await deleteInstanceMappings({
-            userId: ownerId,
-            projectId,
-        })
-
-        await prisma.projectRoom.updateMany({
-            where: {
-                projectId,
-                userId: ownerId
-            },
-            data: {
-                vmState: "STOPPED"
-            }
-        })
-
-        return `No metadata found for instance ${instanceId}`;
-       }
-
-       // 3. Stop my-code-server container inside VM
-       try{
-            if(instanceMetaData.publicIP && instanceMetaData.containerName){
-                await axios.post(`http://${instanceMetaData.publicIP}:3000/stop`,{
-                containerName : instanceMetaData.containerName
-                })
-            }
-        }
-       catch(err : unknown){
-           if(err instanceof Error){
-               console.error(`Failed to stop container for instance ${instanceId} ${err.message}`);
-           } 
-       }
-        
-        // 4.1 Delete instance from ASG
-        await terminateAndScaleDown(instanceId!,true);
-        // 4.2 Delete that particular instance key from redis 
-        // 4.3 Delete that particular user-instance mapping
-        // 4.4 Delete that particular project-instance mapping
-
-        await deleteInstanceLifecycle(instanceId);
-
-
-        // 5. Delete object from bucket
         const objectKey = `projects/${ownedProject.name}_${projectId}/code-${ownedProject.type}`;
-        await deleteS3Object("bolt-app-v2",objectKey);
+        await deleteS3Object("bolt-app-v2", objectKey);
 
-        // Mark STOPPED after cleanup
-        await prisma.projectRoom.updateMany({
-            where: {
-                projectId,
-                userId: ownerId
-            },
-            data: {
-                vmState: "STOPPED"
-            }
+        await markProjectDeleted(projectId,{
+            cleanupCompletedAt: new Date(),
         })
 
-        return `${instanceId} associated with ${projectId} successfully deleted`;
+        return `Project ${projectId} deleted successfully. ${runtimeCleanupMessage}`;
     }
    
     catch(err : unknown){
+        await markProjectFailed(projectId,
+            err instanceof Error ? err.message : "Unknown delete cleanup error",
+        )
+        
         await prisma.projectRoom.updateMany({
             where: {
                 projectId,
@@ -388,3 +316,103 @@ export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : 
     }
 }
 
+export const cleanupProjectRuntimeAssignment = async (
+  projectId: string,
+  ownerId: string,
+) => {
+  const ownedProject = await prisma.project.findFirst({
+    where: {
+      id: projectId,
+      ownerId,
+    },
+    select: {
+      id: true,
+      ownerId: true,
+    },
+  });
+
+  if (!ownedProject) {
+    throw new Error("Forbidden cleanup attempt: user does not own the project");
+  }
+
+  await prisma.projectRoom.updateMany({
+    where: {
+      projectId,
+      userId: ownerId,
+    },
+    data: {
+      vmState: "TERMINATING",
+    },
+  });
+
+  const instanceId = await getInstanceIdForProject(projectId);
+
+  if (!instanceId) {
+    await deleteInstanceMappings({
+      userId: ownerId,
+      projectId,
+    });
+
+    await prisma.projectRoom.updateMany({
+      where: {
+        projectId,
+        userId: ownerId,
+      },
+      data: {
+        vmState: "STOPPED",
+      },
+    });
+
+    return `No active instance for project ${projectId}`;
+  }
+
+  const instanceMetaData = await getInstance(instanceId);
+
+  if (!instanceMetaData) {
+    await deleteInstanceMappings({
+      userId: ownerId,
+      projectId,
+    });
+
+    await deleteInstanceRecord(instanceId);
+
+    await prisma.projectRoom.updateMany({
+      where: {
+        projectId,
+        userId: ownerId,
+      },
+      data: {
+        vmState: "STOPPED",
+      },
+    });
+
+    return `No metadata found for instance ${instanceId}`;
+  }
+
+  try {
+    if (instanceMetaData.publicIP && instanceMetaData.containerName) {
+      await axios.post(`http://${instanceMetaData.publicIP}:3000/stop`, {
+        containerName: instanceMetaData.containerName,
+      });
+    }
+  } catch (err) {
+    if (err instanceof Error) {
+      console.error(`Failed to stop container for instance ${instanceId}: ${err.message}`);
+    }
+  }
+
+  await terminateAndScaleDown(instanceId, true);
+  await deleteInstanceLifecycle(instanceId);
+
+  await prisma.projectRoom.updateMany({
+    where: {
+      projectId,
+      userId: ownerId,
+    },
+    data: {
+      vmState: "STOPPED",
+    },
+  });
+
+  return `${instanceId} associated with ${projectId} successfully cleaned up`;
+};
