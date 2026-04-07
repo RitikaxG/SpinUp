@@ -1,3 +1,4 @@
+import { promise } from "zod";
 import { getASGInstances, setDesiredCapacity, getDesiredCapacity, terminateAndScaleDown } from "../lib/aws/asgCommands"
 import { markProjectFailed } from "./projectLifecycleManager";
 import { InstanceStatus, getInstance, deleteInstanceLifecycle } from "./redisManager";
@@ -12,6 +13,73 @@ interface InstanceInfo {
 }
 
 const THRESHOLD_IDLE_MACHINE_COUNT = 5;
+const IDLE_TIMEOUT_MS = 20*60*1000; // 20 minutes
+
+const terminateIdleInstance = async ( instanceId : string, reason : string ) => {
+  const redisRecord = await getInstance(instanceId);
+  if(redisRecord?.inUse === "true"){
+    return false;
+  }
+
+  console.log(`Scaling in idle instance ${instanceId} . Reason : ${reason}`);
+  await terminateAndScaleDown(instanceId, true);
+  await deleteInstanceLifecycle(instanceId);
+  return true;
+}
+
+export const reconcileWarmPool = async() => {
+  const idleMachines = await getIdleMachines();
+  const now = Date.now();
+
+  const candidates = ( await Promise.all(
+    idleMachines.filter((instance) => instance.InstanceId)
+    .map(async (instance) => {
+      const instanceId = instance.InstanceId!;
+      const redisRecord = await getInstance(instanceId);
+
+      return {
+        instanceId,
+        status : instance.status,
+        lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
+      }
+    })
+  )
+  ).sort((a,b) => a.lastHeartbeatAt - b.lastHeartbeatAt)
+
+  // 1. Expire old idle instances
+  for(const candidate of candidates){
+    if(candidate.lastHeartbeatAt > 0 && now - candidate.lastHeartbeatAt > IDLE_TIMEOUT_MS){
+      await terminateIdleInstance(candidate.instanceId,"idle timeout exceeded")
+    }
+  }
+
+  // 2. Shrink pool if still above target
+  const refreshedIdleMachines = await getIdleMachines();
+  const overflow = refreshedIdleMachines.length - THRESHOLD_IDLE_MACHINE_COUNT;
+  if(overflow >= 0){
+    return
+  }
+
+  const refreshedCandidates = (
+    await Promise.all(
+      refreshedIdleMachines
+      .filter((instance) => instance.InstanceId)
+      .map(async (instance) => {
+        const instanceId = instance.InstanceId!
+        const redisRecord = await getInstance(instanceId);
+
+        return {
+          instanceId,
+          lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
+        }
+      })
+    )
+  ).sort((a,b) => a.lastHeartbeatAt- b.lastHeartbeatAt) 
+
+  for(const candidate of refreshedCandidates.slice(0,overflow)){
+    await terminateIdleInstance(candidate.instanceId, "pool over target")
+  }
+}
 
 
 export const getAllInstancesInfo = async () : Promise<InstanceInfo[]> => {
@@ -135,8 +203,3 @@ export const terminatingUnhealthyInstances = async () => {
   }
 };
 
-const idleMachines = await getIdleMachines();
-console.log(idleMachines);
-console.log(idleMachines.length);
-
-getAllInstancesInfo();

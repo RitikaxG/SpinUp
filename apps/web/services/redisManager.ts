@@ -316,6 +316,57 @@ export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : 
     }
 }
 
+const pingVmAgent = async(publicIP : string) => {
+    try{
+        const healthCheck = await axios.get(`http://${publicIP}:3000/health`,{
+            timeout: 5000
+        });
+
+        return healthCheck.data === "OK";
+    }catch{
+        return false;
+    }
+}
+
+const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
+    let stopSuceeded = true;
+    if(instanceMetaData.publicIP && instanceMetaData.containerName){
+        
+        try{
+            await axios.post(`http://${instanceMetaData.publicIP}:3000/stop`,{
+                containerName : instanceMetaData.containerName
+            },{
+                timeout: 5000
+            })
+        }catch(err){
+            stopSuceeded = false;
+            if(err instanceof Error){
+                console.error(`Failed to stop container for instance ${instanceMetaData.instanceId}: ${err.message}`);
+            }
+        }
+    }
+
+    const vmHealthy = instanceMetaData.publicIP ? await pingVmAgent(instanceMetaData.publicIP) : false;
+    if(stopSuceeded && vmHealthy){
+        await writeIdleInstance(instanceMetaData.instanceId);
+        return {
+            disposition : "IDLE" as const,
+            message : `Returned healthy instance ${instanceMetaData.instanceId} to idle pool`
+        }
+    }
+
+    await markInstanceTerminating(instanceMetaData.instanceId);
+    await terminateAndScaleDown(instanceMetaData.instanceId, false); // replace bad machine without shrinking the pool
+    await deleteInstanceLifecycle(instanceMetaData.instanceId);
+    
+    return {
+        disposition : "TERMINATED" as const,
+        message : `Terminated unhealthy instance ${instanceMetaData.instanceId}`
+    }
+}
+
+
+
 export const cleanupProjectRuntimeAssignment = async (
   projectId: string,
   ownerId: string,
@@ -389,20 +440,7 @@ export const cleanupProjectRuntimeAssignment = async (
     return `No metadata found for instance ${instanceId}`;
   }
 
-  try {
-    if (instanceMetaData.publicIP && instanceMetaData.containerName) {
-      await axios.post(`http://${instanceMetaData.publicIP}:3000/stop`, {
-        containerName: instanceMetaData.containerName,
-      });
-    }
-  } catch (err) {
-    if (err instanceof Error) {
-      console.error(`Failed to stop container for instance ${instanceId}: ${err.message}`);
-    }
-  }
-
-  await terminateAndScaleDown(instanceId, true);
-  await deleteInstanceLifecycle(instanceId);
+  const result = await recycleInstanceIfHealthy(instanceMetaData);
 
   await prisma.projectRoom.updateMany({
     where: {
@@ -414,5 +452,5 @@ export const cleanupProjectRuntimeAssignment = async (
     },
   });
 
-  return `${instanceId} associated with ${projectId} successfully cleaned up`;
+  return `${instanceId} associated with ${projectId} successfully cleaned up. ${result.message}`;
 };
