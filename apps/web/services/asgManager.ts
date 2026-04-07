@@ -362,9 +362,6 @@ export const reconcileAutoScaling = async () => {
 }
 
 
-export const checkAndScaleUp = async () => {
-  return ensureIdleCapacityForAllocation();
-};
 
 export const reconcileWarmPool = async () => {
   return reconcileAutoScaling();

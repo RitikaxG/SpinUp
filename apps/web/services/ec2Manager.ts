@@ -1,6 +1,6 @@
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
-import { checkAndScaleUp, getIdleMachines } from "./asgManager"
+import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
 import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
@@ -35,8 +35,10 @@ export const allocateVmAndScaleUp = async () => {
         return { instanceId : idleMachines[0]?.InstanceId ?? null}
     }
    
-    console.log(`No idle machines found scaling up...`);
-    await checkAndScaleUp();
+    console.log(`No idle machines found. Ensuring idle capacity..`);
+    const scalingDecision = await ensureIdleCapacityForAllocation();
+    console.log(`Allocation scaling decision: ${scalingDecision.action} - ${scalingDecision.reason}`);
+
 
     // Wait for an idle machine to become available
     const start = Date.now();
@@ -394,6 +396,7 @@ export const heartBeat = async () => {
                 publicIp: null,
                 lastHeartbeatAt: null
             })
+
             await cleanUpOwnedProjectInstance(projectId, project.ownerId);
             continue;
         }  

@@ -1,22 +1,53 @@
-import { NextResponse } from "next/server";
-import { checkAndScaleUp, reconcileWarmPool, terminatingUnhealthyInstances } from "../../../../../services/asgManager";
+import { NextRequest, NextResponse } from "next/server";
+import { reconcileAutoScaling } from "../../../../../services/asgManager";
 
-export async function POST(req: Request){
-    const secret = req.headers.get("x-internal-secret");
-    if(secret != process.env.INTERNAL_CRON_SECRET){
-        return NextResponse.json({
-            error : "Unauthorised"
-        },{
-            status : 401
-        })
-    }
+const INTERNAL_SECRET_HEADER = "x-internal-secret";
 
-    await terminatingUnhealthyInstances();
-    await reconcileWarmPool();
-    await checkAndScaleUp();
+export async function POST(req: NextRequest) {
+  const expectedSecret = process.env.INTERNAL_CRON_SECRET;
+  const providedSecret = req.headers.get(INTERNAL_SECRET_HEADER);
 
-    return NextResponse.json({
-        ok : true,
-        message : "Warm pool reconciled"
-    })
+  if (!expectedSecret) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "INTERNAL_CRON_SECRET is not configured",
+      },
+      { status: 500 }
+    );
+  }
+
+  if (providedSecret !== expectedSecret) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Unauthorized",
+      },
+      { status: 401 }
+    );
+  }
+
+  try {
+    const result = await reconcileAutoScaling();
+
+    return NextResponse.json(
+      {
+        ok: true,
+        message: "Autoscaling reconciliation completed",
+        result,
+      },
+      { status: 200 }
+    );
+  } catch (err: unknown) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : "Unknown autoscaling reconciliation error",
+      },
+      { status: 500 }
+    );
+  }
 }
