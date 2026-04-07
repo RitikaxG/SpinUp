@@ -5,13 +5,69 @@ import { deleteS3Object } from "../lib/aws/s3Commands";
 const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
 import { markProjectDeleted, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
+import { randomUUID } from "crypto";
+import { number, string } from "zod";
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");
 }
 
+
 export const redis = new Redis(REDIS_URL);
 
+/*
+
+only delete the key if the stored token matches the caller’s token
+prevents one request from releasing another request’s lock
+*/
+
+const RELEASE_LOCK_SCRIPT = `
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+else
+  return 0
+end
+`;
+
+// returns token if lock acquired, returns null if lock already held
+
+export const aquireDistributedLock = async (
+    key : string,
+    ttlMs : number,
+): Promise<string | null> => {
+    const token = randomUUID();
+    const result = await redis.set(key,token,"PX",ttlMs,"NX");
+
+    if(result != "OK"){
+        return null;
+    }
+
+    return token;
+}
+
+export const releaseDistributedLock = async (
+    key : string,
+    token : string
+): Promise<void> => {
+    await redis.eval(RELEASE_LOCK_SCRIPT,1,key,token);
+}
+
+export const withDistributedLock = async<T>(
+    key : string,
+    ttlMs : number,
+    fn : () => Promise<T>
+) : Promise<T | null> => {
+    const token = await aquireDistributedLock(key,ttlMs);
+    if(!token){
+        return null;
+    }
+
+    try{
+        return await fn();
+    } finally {
+        await releaseDistributedLock(key,token)
+    }
+}
 
 // Defining types and Key builders
 export type InstanceStatus = "BOOTING" | "RUNNING" | "FAILED" | "TERMINATING" | "STOPPED" | "IDLE"
