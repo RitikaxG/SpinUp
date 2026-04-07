@@ -6,7 +6,6 @@ const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
 import { markProjectDeleted, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
-import { number, string } from "zod";
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");

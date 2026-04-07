@@ -1,8 +1,9 @@
-import { promise } from "zod";
-import { getASGInstances, setDesiredCapacity, getDesiredCapacity, terminateAndScaleDown } from "../lib/aws/asgCommands"
+import { terminateAndScaleDown, getAutoScalingGroupState, setDesiredCapacityIfChanged } from "../lib/aws/asgCommands"
+import type { AutoScalingGroupState } from "../lib/aws/asgCommands";
 import { markProjectFailed } from "./projectLifecycleManager";
-import { InstanceStatus, getInstance, deleteInstanceLifecycle } from "./redisManager";
+import { InstanceStatus, getInstance, deleteInstanceLifecycle, withDistributedLock } from "./redisManager";
 import { prisma } from "db/client";
+import { AUTOSCALING_CONFIG } from "../lib/autoscaling/config";
 
 interface InstanceInfo {
     InstanceId? : string;
@@ -10,12 +11,73 @@ interface InstanceInfo {
     HealthStatus? : string;
     inUse? : boolean; 
     status? : InstanceStatus | "UNTRACKED"
+    lastHeartbeatAt? : number
 }
 
-const THRESHOLD_IDLE_MACHINE_COUNT = 5;
-const IDLE_TIMEOUT_MS = 20*60*1000; // 20 minutes
+export type ScalingSnapshot = {
+  totalInstances : number,
+  desiredCapacity : number,
+  healthyInServiceCount : number,
+  unhealthyCount : number,
+  idleCount : number,
+  busyCount : number,
+  idleInstanceIds : string[]
+}
 
-const terminateIdleInstance = async ( instanceId : string, reason : string ) => {
+export type ScalingPlan = 
+  | { action : "SCALE_UP"; targetDesiredCapacity : number; reason : string }
+  | { action : "KEEP"; reason : string }
+  | { action : "RECYCLE_IDLE"; instanceIds : string[] ; reason : string  };
+
+const isHealthyInService = (instance : InstanceInfo ) => {
+  return (
+    instance.HealthStatus === "Healthy" &&
+    instance.LifecycleState === "InService"
+  )
+}
+
+const isIdleCandidate = (instance : InstanceInfo) => {
+  return (
+    isHealthyInService(instance) &&
+    ( instance.status === "IDLE" || instance.status === "UNTRACKED" )
+  )
+}
+
+export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) : Promise<InstanceInfo[]> => {
+    const state = groupState ?? (await getAutoScalingGroupState());
+
+    const instanceDetails = await Promise.all(
+        state.instances.map(async (instance): Promise<InstanceInfo> => {
+
+        const instanceId = instance.InstanceId;
+        if(!instanceId){
+            return{
+                InstanceId: undefined,
+                LifecycleState: instance.LifecycleState,
+                HealthStatus: instance.HealthStatus,
+                inUse: false,
+                status: "UNTRACKED",
+                lastHeartbeatAt: 0
+            }
+        }
+
+        const redisRecord = await getInstance(instanceId);
+    
+        return {
+            InstanceId : instanceId,
+            LifecycleState : instance.LifecycleState,
+            HealthStatus : instance.HealthStatus,
+            inUse : redisRecord ? redisRecord.inUse === "true" : false,
+            status: redisRecord?.status ?? "UNTRACKED",
+            lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
+        }
+        })
+    ) 
+
+    return instanceDetails;  
+}
+
+const terminateIdleInstance = async ( instanceId : string, reason : string ) : Promise<boolean> => {
   const redisRecord = await getInstance(instanceId);
   if(redisRecord?.inUse === "true"){
     return false;
@@ -27,96 +89,91 @@ const terminateIdleInstance = async ( instanceId : string, reason : string ) => 
   return true;
 }
 
-export const reconcileWarmPool = async() => {
-  const idleMachines = await getIdleMachines();
+const reapTimedOutIdleInstances = async() : Promise<string[]> => {
+  const timeoutMs = AUTOSCALING_CONFIG.IDLE_TIMEOUT_MINUTES * 60 * 1000;
   const now = Date.now();
+  
+  const instances = await getAllInstancesInfo();
 
-  const candidates = ( await Promise.all(
-    idleMachines.filter((instance) => instance.InstanceId)
-    .map(async (instance) => {
-      const instanceId = instance.InstanceId!;
-      const redisRecord = await getInstance(instanceId);
+  const expiredIdleInstances = instances
+    .filter((instance) => 
+      isIdleCandidate(instance) &&
+      Boolean(instance.InstanceId) &&
+      (instance.lastHeartbeatAt ?? 0) > 0 &&
+      now - (instance.lastHeartbeatAt ?? 0) > timeoutMs 
+    ).sort(
+      (a,b) => (a.lastHeartbeatAt ?? 0) - (b.lastHeartbeatAt ?? 0)
+    )
+    .map((instance) => instance.InstanceId!)
+    .filter(Boolean);
 
-      return {
-        instanceId,
-        status : instance.status,
-        lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
-      }
-    })
-  )
-  ).sort((a,b) => a.lastHeartbeatAt - b.lastHeartbeatAt)
+  const terminated : string[] = [];
 
-  // 1. Expire old idle instances
-  for(const candidate of candidates){
-    if(candidate.lastHeartbeatAt > 0 && now - candidate.lastHeartbeatAt > IDLE_TIMEOUT_MS){
-      await terminateIdleInstance(candidate.instanceId,"idle timeout exceeded")
+  for(const instanceId of expiredIdleInstances){
+    const didTerminate = await terminateIdleInstance(
+      instanceId,
+      "idle timeout exceeded"
+    );
+
+    if(didTerminate){
+      terminated.push(instanceId);
     }
   }
 
-  // 2. Shrink pool if still above target
-  const refreshedIdleMachines = await getIdleMachines();
-  const overflow = refreshedIdleMachines.length - THRESHOLD_IDLE_MACHINE_COUNT;
-  if(overflow >= 0){
-    return
-  }
-
-  const refreshedCandidates = (
-    await Promise.all(
-      refreshedIdleMachines
-      .filter((instance) => instance.InstanceId)
-      .map(async (instance) => {
-        const instanceId = instance.InstanceId!
-        const redisRecord = await getInstance(instanceId);
-
-        return {
-          instanceId,
-          lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
-        }
-      })
-    )
-  ).sort((a,b) => a.lastHeartbeatAt- b.lastHeartbeatAt) 
-
-  for(const candidate of refreshedCandidates.slice(0,overflow)){
-    await terminateIdleInstance(candidate.instanceId, "pool over target")
-  }
+  return terminated;
 }
 
+const runScaleUpUnderLock = async () : Promise<ScalingPlan | null> => {
+  return withDistributedLock<ScalingPlan>(
+    AUTOSCALING_CONFIG.SCALE_UP_LOCK_KEY,
+    AUTOSCALING_CONFIG.SCALE_UP_LOCK_TTL_MS,
+    async () => {
+      const freshSnapshot = await getScalingSnapshot();
+      const freshPlan = computeScalingPlan(freshSnapshot);
 
-export const getAllInstancesInfo = async () : Promise<InstanceInfo[]> => {
-    const instances = await getASGInstances();
+      if(freshPlan.action !== "SCALE_UP"){
+        return freshPlan;
+      }
 
-    const instanceDetails = await Promise.all(
-        instances.map(async (instance): Promise<InstanceInfo> => {
-
-        const instanceId = instance.InstanceId;
-        if(!instanceId){
-            return{
-                InstanceId: undefined,
-                LifecycleState: instance.LifecycleState,
-                HealthStatus: instance.HealthStatus,
-                inUse: false,
-                status: "UNTRACKED"
-            }
-        }
-
-        const redisRecord = await getInstance(instanceId);
-    
-        return {
-            InstanceId : instanceId,
-            LifecycleState : instance.LifecycleState,
-            HealthStatus : instance.HealthStatus,
-            inUse : redisRecord ? redisRecord.inUse === "true" : false,
-            status: redisRecord?.status ?? "UNTRACKED"
-        }
-        })
-    ) 
-    console.log(instanceDetails);
-    return instanceDetails;  
+      await setDesiredCapacityIfChanged(freshPlan.targetDesiredCapacity);
+      return freshPlan;
+    }
+  )
 }
+
+export const ensureIdleCapacityForAllocation = async(): Promise<ScalingPlan> => {
+  const snapshot = await getScalingSnapshot();
+
+  // Request-time fast path: if at least one idle instance exists,
+  // allocation can proceed immediately.
+  if(snapshot.idleCount >= 1 ){
+    return {
+      action : "KEEP",
+      reason : `Idle capacity already available (${snapshot.idleCount} idle instance(s))`,
+    }
+  }
+
+  const plan = computeScalingPlan(snapshot);
+  if (plan.action !== "SCALE_UP") {
+      return plan;
+  }
+
+  const lockedPlan = await runScaleUpUnderLock();
+  if(!lockedPlan){
+    return {
+      action : "KEEP",
+      reason : "Scale up already in progress by another request"
+    }
+  }
+
+  return lockedPlan;
+
+}
+
 
 export const getReadyInstances = async () => {
     const instances = await getAllInstancesInfo();
-    return instances.filter((instance) => instance.HealthStatus === "Healthy" && instance.LifecycleState === "InService");
+    return instances.filter(isHealthyInService);
 }
 
 export const getUnhealthyInstances = async () => {
@@ -126,30 +183,91 @@ export const getUnhealthyInstances = async () => {
 
 export const getIdleMachines = async () => {
     const instances = await getAllInstancesInfo();
-
-    const idleMachines = instances.filter((instance) => {
-    const isHealthy = instance.HealthStatus === "Healthy";
-    const isInService = instance.LifecycleState === "InService";
-    const isIdle =
-      instance.status === "IDLE" || instance.status === "UNTRACKED";
-
-    return isHealthy && isInService && isIdle;
-    });
-    return idleMachines;
+    return instances.filter(isIdleCandidate)
 }
 
-export const checkAndScaleUp = async () => {
-    const idleMachines = await getIdleMachines();
-    const desiredCapacity = await getDesiredCapacity();
+export const getScalingSnapshot = async() : Promise<ScalingSnapshot> => {
+  const groupState = await getAutoScalingGroupState();
+  const instances = await getAllInstancesInfo(groupState);
 
-    if (idleMachines.length < THRESHOLD_IDLE_MACHINE_COUNT) {
-        const scaleTarget = desiredCapacity + (THRESHOLD_IDLE_MACHINE_COUNT - idleMachines.length);
-        console.log(`Increasing idle machine count from ${desiredCapacity} => ${scaleTarget}`);
-        await setDesiredCapacity(scaleTarget);
-    } else {
-        console.log(`Sufficient idle machine count ${idleMachines.length}`);
-    }
+  const healthyInServiceInstances = instances.filter(isHealthyInService);
+  const unhealthyInstances = instances.filter((instance) => instance.HealthStatus === "Unhealthy");
+
+  const orderedIdleInstances = healthyInServiceInstances
+    .filter(isIdleCandidate)
+    .sort((a,b) => (a.lastHeartbeatAt ?? 0) - (b.lastHeartbeatAt ?? 0));
+
+  const busyInstances = healthyInServiceInstances.filter((instance) => !isIdleCandidate(instance));
+
+  return {
+    totalInstances : groupState.totalInstances,
+    desiredCapacity : groupState.desiredCapacity,
+    healthyInServiceCount : healthyInServiceInstances.length,
+    unhealthyCount : unhealthyInstances.length,
+    idleCount : orderedIdleInstances.length,
+    busyCount: busyInstances.length,
+    idleInstanceIds : orderedIdleInstances
+      .map((instance) => instance.InstanceId)
+      .filter((instanceId): instanceId is string => Boolean(instanceId))
+  }
 };
+
+export const computeScalingPlan = (
+  snapshot : ScalingSnapshot
+): ScalingPlan => {
+  const { MIN_IDLE, MAX_IDLE, MAX_TOTAL_INSTANCES } = AUTOSCALING_CONFIG;
+
+   // Rule 1: unhealthy instances are handled separately by unhealthy cleanup.
+   if(snapshot.unhealthyCount > 0){
+    return {
+      action : "KEEP",
+      reason : "Unhealthy instances are handled seperately before scale decisions"
+    }
+   }
+
+   // Rule 2: below minimum idle pool -> scale up.
+   if(snapshot.idleCount < MIN_IDLE){
+    const missingIdle = MIN_IDLE - snapshot.idleCount;
+    const currentCapacityBase = Math.max(
+      snapshot.desiredCapacity,
+      snapshot.totalInstances
+    );
+
+    const targetDesiredCapacity = Math.min(currentCapacityBase + missingIdle, MAX_TOTAL_INSTANCES);
+
+    if(targetDesiredCapacity > snapshot.desiredCapacity){
+      return {
+        action : "SCALE_UP",
+        targetDesiredCapacity,
+        reason : `Idle count ${snapshot.idleCount} is below min idle ${MIN_IDLE}`
+      }
+    }
+
+    return {
+      action : "KEEP",
+      reason : "Idle count is low but cluster is already at MAX_TOTAL_INSTANCES"
+    }
+   }
+
+  // Rule 3: idle count within band -> keep current capacity.
+  if(snapshot.idleCount <= MAX_IDLE){
+    return {
+      action : "KEEP",
+      reason : `Idle count ${snapshot.idleCount} is within target band ${MIN_IDLE}-${MAX_IDLE}`
+    }
+  };
+
+  // Rule 4: idle count above maximum -> recycle oldest idle instances.
+  const overflow = snapshot.idleCount - MAX_IDLE;
+
+  return {
+    action : "RECYCLE_IDLE",
+    instanceIds : snapshot.idleInstanceIds.slice(0,overflow),
+    reason : `Idle count ${snapshot.idleCount} is above max idle`
+  }
+}
+
+
 
 export const terminatingUnhealthyInstances = async () => {
   const unhealthyInstances = await getUnhealthyInstances();
@@ -203,3 +321,51 @@ export const terminatingUnhealthyInstances = async () => {
   }
 };
 
+export const reconcileAutoScaling = async () => {
+  await terminatingUnhealthyInstances();
+
+  const timedOutIdleInstanceIds = await reapTimedOutIdleInstances();
+
+  const snapshot = await getScalingSnapshot();
+  const plan = computeScalingPlan(snapshot);
+
+  if(plan.action === "RECYCLE_IDLE"){
+    for(const instanceId of plan.instanceIds){
+      await terminateIdleInstance(instanceId,"pool over target");
+    }
+
+    return {
+      action : plan.action,
+      reason : plan.reason,
+      timedOutIdleInstanceIds,
+      recycledIdleInstanceIds : plan.instanceIds
+    }
+  }
+
+  if(plan.action === "SCALE_UP"){
+    const lockedPlan = await runScaleUpUnderLock();
+
+    return {
+      action : lockedPlan?.action ?? "KEEP",
+      reason: lockedPlan?.reason ?? "Scaleup already in progress by another reconciler",
+      timedOutIdleInstanceIds,
+      recycledIdleInstanceIds : [],
+    }
+  }
+
+  return {
+    action : plan.action,
+    reason : plan.reason,
+    timedOutIdleInstanceIds,
+    recycledIdleInstanceIds : []
+  }
+}
+
+
+export const checkAndScaleUp = async () => {
+  return ensureIdleCapacityForAllocation();
+};
+
+export const reconcileWarmPool = async () => {
+  return reconcileAutoScaling();
+};
