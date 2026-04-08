@@ -4,9 +4,9 @@ import axios from "axios";
 import { deleteS3Object } from "../lib/aws/s3Commands";
 const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
-import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
+import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
-import { string } from "zod";
+
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");

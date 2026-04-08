@@ -1,16 +1,61 @@
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
-import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat } from "./redisManager";
+import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat, cleanupProjectRuntimeAssignment } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
-import { markProjectAllocating, markProjectBooting, markProjectFailed, markProjectReady, touchProjectHeartbeat } from "./projectLifecycleManager";
+import { markProjectAllocating, markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle, touchProjectHeartbeat } from "./projectLifecycleManager";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
 
 type ProjectTypeValue = "NEXTJS"| "REACT" | "REACT_NATIVE"
-type VmStateValue = "RUNNING" | "STOPPED" | "FAILED" | "TERMINATING" | "BOOTING"
+type VmStateValue = "RUNNING" | "STOPPED" | "FAILED" | "TERMINATING" | "BOOTING";
+
+export type RuntimeAssignment = {
+    userId : string,
+    instanceId : string,
+    publicIP : string,
+    projectId : string,
+    projectName : string,
+    projectType : ProjectTypeValue,
+    containerName : string,
+};
+
+const buildContainerName = (projectId : string) => `spinup-${projectId}`;
+
+const toRunningAssignment = (
+    ownerId : string,
+    projectId : string,
+    projectName : string,
+    projectType : ProjectTypeValue,
+    instanceId : string,
+    publicIP : string,
+    containerName : string,
+) : RuntimeAssignment => ({
+    userId : ownerId,
+    instanceId,
+    publicIP,
+    projectId,
+    projectName,
+    projectType,
+    containerName,
+});
+
+const isReusableRunningInstance = (
+    ownerId : string,
+    projectId : string,
+    record : Awaited<ReturnType<typeof getInstance>>
+) => {
+    return Boolean(
+        record &&  
+        record.userId === ownerId &&
+        record.projectId === projectId &&
+        record.publicIP &&
+        record.containerName &&
+        record.status === "RUNNING"
+    );
+}
 
 const updateProjectRoomVmState = async (
     projectId : string,
@@ -58,17 +103,17 @@ export const allocateVmAndScaleUp = async () => {
     return { instanceId : null }
 }
 
-export const vmBootingSetup = async (
+export const ensureProjectRuntime = async (
     projectId : string, 
     projectName : string, 
     projectType : ProjectTypeValue, 
     ownerId : string
-) => {
+) : Promise<RuntimeAssignment | null> => {
 
     await updateProjectRoomVmState(projectId, ownerId, "BOOTING");
-    await markProjectAllocating(projectId);
+    
     try{
-        // 1. Check if that user already have a VM assigned ( this will return it's ID )
+        // 1) Reconcile project mapping first
         const existingProjectVmId = await getInstanceIdForProject(projectId);
 
         if(existingProjectVmId){
@@ -80,13 +125,7 @@ export const vmBootingSetup = async (
                 })
                 await deleteInstanceRecord(existingProjectVmId);
             }
-            else if(
-                existingProjectVm.userId === ownerId &&
-                existingProjectVm.projectId === projectId &&
-                existingProjectVm.publicIP &&
-                existingProjectVm.containerName &&
-                existingProjectVm.status === "RUNNING"
-            ){
+            else if(isReusableRunningInstance(ownerId,projectId, existingProjectVm)){
                 await writeRunningInstance({
                     instanceId: existingProjectVm.instanceId,
                     userId: existingProjectVm.userId,
@@ -106,22 +145,22 @@ export const vmBootingSetup = async (
                 await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
             
             
-                return{
-                    userId : ownerId,
-                    instanceId: existingProjectVm.instanceId,
-                    publicIP: existingProjectVm.publicIP,
+                return toRunningAssignment(
+                    ownerId,
                     projectId,
-                    projectName: existingProjectVm.projectName ?? projectName,
-                    projectType: existingProjectVm.projectType as ProjectTypeValue ?? projectType,
-                    containerName: existingProjectVm.containerName
-                }
+                    projectName,
+                    projectType,
+                    existingProjectVm.instanceId,
+                    existingProjectVm.publicIP,
+                    existingProjectVm.containerName,
+                )
             }
             else{
-                await cleanUpOwnedProjectInstance(projectId, ownerId);
+                await cleanupProjectRuntimeAssignment(projectId, ownerId);
             }
         }
 
-        // Check if user is mapped to some other instance
+        // 2) Reconcile user mapping next
         const existingUserVmId = await getInstanceIdForUser(ownerId);
         if(existingUserVmId){
             const existingUserVm = await getInstance(existingUserVmId);
@@ -132,12 +171,7 @@ export const vmBootingSetup = async (
                 })
                 await deleteInstanceRecord(existingUserVmId);
             }
-            else if(
-                existingUserVm.projectId === projectId &&
-                existingUserVm.publicIP &&
-                existingUserVm.containerName &&
-                existingUserVm.status === "RUNNING"
-            ){
+            else if(isReusableRunningInstance(ownerId, projectId,existingUserVm)){
                 // Heal project mapping if user mapping exists but project mapping is stale
                 await writeRunningInstance({
                     instanceId: existingUserVm.instanceId,
@@ -157,27 +191,27 @@ export const vmBootingSetup = async (
                 })
                 await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
 
-                return{
-                    userId : ownerId,
-                    instanceId: existingUserVm.instanceId,
-                    publicIP: existingUserVm.publicIP,
-                    projectId: existingUserVm.projectId,
-                    projectName: existingUserVm.projectName ?? projectName,
-                    projectType: existingUserVm.projectType as ProjectTypeValue ?? projectType,
-                    containerName: existingUserVm.containerName
-                }
+                return toRunningAssignment(
+                    ownerId,
+                    projectId,
+                    projectName,
+                    projectType,
+                    existingUserVm.instanceId,
+                    existingUserVm.publicIP,
+                    existingUserVm.containerName
+                )
             }
             else if(existingUserVm.projectId){
-                await cleanUpOwnedProjectInstance(existingUserVm.projectId, ownerId);
+                await cleanupProjectRuntimeAssignment(existingUserVm.projectId, ownerId);
             }
             else{
-                await deleteInstanceMappings({projectId});
+                await deleteInstanceMappings({ userId: ownerId });
                 await deleteInstanceRecord(existingUserVm.instanceId);
             }
         }
         
         
-        // 2. Get a fresh idle instance
+        // 3) Allocate fresh VM
         const allocation = await allocateVmAndScaleUp();
 
         if(!allocation.instanceId){
@@ -188,15 +222,34 @@ export const vmBootingSetup = async (
 
         const instanceId = allocation.instanceId;
 
-        // 3. Get its public IP
+       // 4) Fetch public IP
         const publicIP   = await getPublicIP(instanceId);
         if(!publicIP){
             console.error(`Failed to fetch public IP for instance ${instanceId}`);
-            await terminateAndScaleDown(instanceId,true); // rollback
-            await updateProjectRoomVmState(projectId,ownerId,"FAILED")
-            return null;
+
+            try{
+                await terminateAndScaleDown(instanceId,true); 
+            } catch(err){
+                if(err instanceof Error){
+                    console.error(`Rollback terminate failed for ${instanceId}: ${err.message}`);
+                }
+            } finally {
+                await updateProjectRoomVmState(projectId,ownerId,"FAILED")
+            }
+
+            await updateProjectRoomVmState(projectId, ownerId, "FAILED");
+            await markProjectFailed(
+                projectId,
+                `Failed to fetch public IP for instance ${instanceId}`,
+                {
+                assignedInstanceId: null,
+                publicIp: null,
+                containerName: null,
+                },
+            );
         }
 
+         // 5) Persist BOOTING redis state
         await writeBootingInstance({
             instanceId,
             userId: ownerId,
@@ -206,46 +259,64 @@ export const vmBootingSetup = async (
             publicIP,
         })
         
-        // 4. Start my-code-server container inside VM
-        let containerName: string;
+        const bootStartedAt = new Date();
+
+        await markProjectBooting(projectId,{
+            instanceId,
+            publicIp: publicIP,
+            bootStartedAt,
+        })
+
+        // 6) Start deterministic container
+        let containerName = buildContainerName(projectId);
+
         try{
-            const bootStartedAt = new Date();
-
-            await markProjectBooting(projectId,{
-                instanceId,
-                publicIp: publicIP,
-                bootStartedAt,
-            })
-
-            const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
+             const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
                 projectId, 
                 projectName, 
-                projectType 
-            })
-            containerName = startContainer.data.conatinerName ?? startContainer.data.containerName;
+                projectType ,
+                containerName
+            },{
+                timeout : 15_000,
+            });
 
-            if(!containerName){
-                throw new Error(`Container name missing in start response`)
-            }
+            containerName = startContainer.data.conatinerName ?? startContainer.data.containerName ?? containerName;
+
+            // Persist container name as soon as we know it.
+            await patchProjectLifecycle(projectId, {
+                containerName,
+            });
         }
+        
         catch(err:unknown){
             if(err instanceof Error){
                 console.error(`Unable to start container inside instance ${instanceId} ${err.message}`);
             }
-            await terminateAndScaleDown(instanceId,true); // rollback if container does not starts
-            await deleteInstanceLifecycle(instanceId);
 
+            try{
+                await terminateAndScaleDown(instanceId,true);
+            } catch( terminateErr ){
+                if(terminateErr instanceof Error){
+                    console.error(
+                        `Rollback terminate failed for ${instanceId}: ${terminateErr.message}`,
+                    );
+                }
+            } finally {
+                await deleteInstanceLifecycle(instanceId);
+            }
+            
             await updateProjectRoomVmState(projectId,ownerId,"FAILED");
             await markProjectFailed(projectId,
                 `Unable to start container inside instance ${instanceId} ${err instanceof Error ? err.message : "Unknown error"}`
             ,{
                 assignedInstanceId: instanceId,
                 publicIp: publicIP,
+                containerName: null,
             })
             return null;
         }
 
-        // Promote BOOTING -> RUNNING
+        // 7. Promote BOOTING -> RUNNING
         await writeRunningInstance({
             instanceId,
             userId: ownerId,
@@ -262,17 +333,18 @@ export const vmBootingSetup = async (
             containerName,
             bootCompletedAt: new Date(),
         })
+
         await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
 
-        return {
-            userId: ownerId,
-            instanceId,
-            publicIP,
+        return toRunningAssignment(
+            ownerId,
             projectId,
             projectName,
             projectType,
-            containerName
-        }
+            instanceId,
+            publicIP,
+            containerName,
+        )
     }
     catch(err){
         await updateProjectRoomVmState(projectId, ownerId, "FAILED");
