@@ -1,7 +1,7 @@
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
-import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat, cleanupProjectRuntimeAssignment } from "./redisManager";
+import { redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat, cleanupProjectRuntimeAssignment } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle, touchProjectHeartbeat } from "./projectLifecycleManager";
@@ -121,6 +121,7 @@ export const ensureProjectRuntime = async (
 
             if(!existingProjectVm){
                 await deleteInstanceMappings({
+                    userId: ownerId,
                     projectId,
                 })
                 await deleteInstanceRecord(existingProjectVmId);
@@ -234,7 +235,7 @@ export const ensureProjectRuntime = async (
                     console.error(`Rollback terminate failed for ${instanceId}: ${err.message}`);
                 }
             } finally {
-                await updateProjectRoomVmState(projectId,ownerId,"FAILED")
+                await deleteInstanceLifecycle(instanceId);
             }
 
             await updateProjectRoomVmState(projectId, ownerId, "FAILED");
@@ -247,6 +248,7 @@ export const ensureProjectRuntime = async (
                 containerName: null,
                 },
             );
+            return null;
         }
 
          // 5) Persist BOOTING redis state
@@ -280,7 +282,7 @@ export const ensureProjectRuntime = async (
                 timeout : 15_000,
             });
 
-            containerName = startContainer.data.conatinerName ?? startContainer.data.containerName ?? containerName;
+            containerName = startContainer.data.containerName ?? containerName;
 
             // Persist container name as soon as we know it.
             await patchProjectLifecycle(projectId, {
@@ -392,7 +394,7 @@ export const heartBeat = async () => {
                 });
 
                 if (project) {
-                await cleanUpOwnedProjectInstance(projectId, project.ownerId);
+                    await cleanupProjectRuntimeAssignment(projectId, project.ownerId);
                 } else {
                 await deleteInstanceLifecycle(instanceId);
                 }
@@ -469,7 +471,7 @@ export const heartBeat = async () => {
                 lastHeartbeatAt: null
             })
 
-            await cleanUpOwnedProjectInstance(projectId, project.ownerId);
+            await cleanupProjectRuntimeAssignment(projectId, project.ownerId);
             continue;
         }  
 
