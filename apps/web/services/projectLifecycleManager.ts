@@ -25,20 +25,34 @@ const ALLOWED_TRANSITIONS : Record<ProjectLifecycleStatus, ProjectLifecycleStatu
     DELETED:[],
 }
 
+const getProjectStatus = async ( projectId : string ) => {
+    const current = await prisma.project.findUnique({
+        where: {
+            id : projectId
+        },
+        select : {
+            id: true,
+            status: true,
+            cleanupStartedAt: true,
+            cleanupCompletedAt: true,
+            deletedAt: true
+        }
+    })
+
+    if(!current){
+        throw new Error(`Project not found`);
+    }
+    return current;
+}
+
 const transitionProject = async (
     projectId : string,
     nextStatus: ProjectLifecycleStatus,
     patch: LifecyclePatch = {},
 ) => {
-    const current = await prisma.project.findUnique({
-        where:{id: projectId},
-        select:{id: true, status: true}
-    })
+    const current = await getProjectStatus(projectId);
 
-    if(!current){
-        throw new Error("Project not found");
-    }
-
+    // True idempotent retry: same-state patch is allowed and returns immediately.
     if(current.status === nextStatus){
         await prisma.project.update({
             where: { id: projectId },
@@ -57,6 +71,20 @@ const transitionProject = async (
         where: { id: projectId },
         data: {
             status: nextStatus,
+            ...patch,
+        }
+    })
+}
+
+export const patchProjectLifecycle = async (
+    projectId : string,
+    patch : LifecyclePatch,
+) => {
+    await getProjectStatus(projectId);
+
+    return prisma.project.update({
+        where : { id: projectId },
+        data : {
             ...patch,
         }
     })
@@ -120,6 +148,9 @@ export const markProjectFailed = async(
     reason: string,
     patch: LifecyclePatch = {}
 ) => {
+
+    await getProjectStatus(projectId);
+
     await prisma.project.update({
         where: { id: projectId },
         data: {
@@ -131,9 +162,36 @@ export const markProjectFailed = async(
 }
 
 export const markProjectDeleting = async ( projectId : string ) => {
+    const current = await getProjectStatus(projectId);
+
+    const cleanupStartedAt = current.cleanupStartedAt ?? new Date();
+
     return transitionProject(projectId,"DELETING",{
-        cleanupStartedAt: new Date(),
+        cleanupStartedAt,
         statusReason: null
+    })
+}
+
+export const markProjectDeletePendingReason = async ( 
+    projectId : string,
+    reason : string,
+    patch : LifecyclePatch = {},
+) => {
+
+    const current = await getProjectStatus(projectId);
+    if(current.status === "DELETED"){
+        return prisma.project.findUnique({
+            where : { id : projectId }
+        })
+    }
+
+    if(current.status === "DELETING"){
+        await markProjectDeleting(projectId);
+    }
+
+    return patchProjectLifecycle(projectId,{
+        statusReason: reason,
+        ...patch,
     })
 }
 
@@ -144,9 +202,14 @@ export const markProjectDeleted = async (
         cleanupCompletedAt : Date
     }
 ) => {
+    const current = await getProjectStatus(projectId);
+
+    const completedAt = current.cleanupCompletedAt ?? cleanupCompletedAt;
+    const deletedAt = current.deletedAt ?? cleanupCompletedAt;
+
     return transitionProject(projectId,"DELETED",{
-        cleanupCompletedAt,
-        deletedAt: cleanupCompletedAt,
+        cleanupCompletedAt : completedAt,
+        deletedAt,
         lastHeartbeatAt: null,
         assignedInstanceId: null,
         containerName: null,

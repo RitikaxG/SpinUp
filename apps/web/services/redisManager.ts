@@ -30,7 +30,7 @@ end
 
 // returns token if lock acquired, returns null if lock already held
 
-export const aquireDistributedLock = async (
+export const acquireDistributedLock = async (
     key : string,
     ttlMs : number,
 ): Promise<string | null> => {
@@ -56,7 +56,7 @@ export const withDistributedLock = async<T>(
     ttlMs : number,
     fn : () => Promise<T>
 ) : Promise<T | null> => {
-    const token = await aquireDistributedLock(key,ttlMs);
+    const token = await acquireDistributedLock(key,ttlMs);
     if(!token){
         return null;
     }
