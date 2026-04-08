@@ -4,8 +4,9 @@ import axios from "axios";
 import { deleteS3Object } from "../lib/aws/s3Commands";
 const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
-import { markProjectDeleted, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
+import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting, markProjectFailed } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
+import { string } from "zod";
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");
@@ -92,6 +93,15 @@ export const redisKeys = {
     userInstance: (userId : string) => `user:${userId}:instance`,
     projectInstance: (projectId : string) => `project:${projectId}:instance`
 }
+
+export const controlPlaneLockKeys = {
+    createProject : (ownerId : string, normalizedName: string ) => 
+        `lock:project:create:${ownerId}:${normalizedName.toLowerCase()}`,
+    deleteProject: (projectId : string ) => `lock:project:delete:${projectId}`,
+    runtime : (projectId : string) => `lock:project:runtime:${projectId}`
+} as const;
+
+export const CONTROL_PLANE_LOCK_TTL_MS = 30_000;
 
 const toInstanceRecord = (data: Record<string,string>): InstanceRecord => {
     return {
@@ -314,60 +324,115 @@ export const deleteInstanceLifecycle = async (instanceId : string) => {
         .exec()
 }
 
+const bestEffortTerminateInstance = async(
+    instanceId : string,
+    shouldDecreaseCapacity : boolean,
+) => {
+    try{
+        await terminateAndScaleDown(instanceId, shouldDecreaseCapacity);
+    } catch(err){
+        if(err instanceof Error){
+            console.error(`Terminate failed for ${instanceId} : ${err.message}`)
+        } else {
+            console.error(`Terminate failed for ${instanceId}`)
+        }
+    } finally {
+        await deleteInstanceLifecycle(instanceId);
+    }
+}
 
+export const cleanupProjectArtifacts = async ({
+    projectId,
+    projectName,
+    projectType,
+}: {
+    projectId : string,
+    projectName : string,
+    projectType : string
+}) => {
+    const objectKey = `projects/${projectName}_${projectId}/code-${projectType}`;
+
+    // S3 delete is idempotent: deleting a missing object still succeeds.
+    await deleteS3Object("bolt-app-v2",objectKey);
+
+    return `Deleted S3 object if present ${objectKey}`;
+
+}
+
+export const finalizeProjectDeletion = async (
+    projectId : string,
+    ownerId : string
+) => {
+    const lingeringProjectMapping = await getInstanceIdForProject(projectId);
+    if(lingeringProjectMapping){
+        await markProjectDeletePendingReason(
+            projectId,
+            `Deletion not finalised : project mapping still points to instance ${lingeringProjectMapping}`
+        );
+        return null;
+    }
+
+    await prisma.projectRoom.updateMany({
+        where: {
+            projectId,
+            userId : ownerId,
+        },
+        data : {
+            vmState : "STOPPED"
+        }
+    });
+
+    return markProjectDeleted(projectId, {
+        cleanupCompletedAt: new Date(),
+    })
+}
 
 export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : string) => {
-    try{
-        // 1. Ownership Verification
-        const ownedProject = await prisma.project.findFirst({
-            where : {
-                id : projectId,
-                ownerId,
-            },
-            select: {
-                id : true,
-                name : true,
-                type : true,
-            }
-        })
-
-        if(!ownedProject){
-            throw new Error("Forbidden cleanup attempt : User does not own the project");
+   
+    // 1. Ownership Verification
+    const ownedProject = await prisma.project.findFirst({
+        where : {
+            id : projectId,
+            ownerId,
+        },
+        select: {
+            id : true,
+            name : true,
+            type : true,
         }
+    })
 
-        await markProjectDeleting(projectId);
+    if(!ownedProject){
+        throw new Error("Forbidden cleanup attempt : User does not own the project");
+    }
 
+    await markProjectDeleting(projectId);
+
+    try{
         const runtimeCleanupMessage = await cleanupProjectRuntimeAssignment(projectId, ownerId);
 
-        const objectKey = `projects/${ownedProject.name}_${projectId}/code-${ownedProject.type}`;
-        await deleteS3Object("bolt-app-v2", objectKey);
+        const artifactCleanupMessage = await cleanupProjectArtifacts({
+            projectId,
+            projectName : ownedProject.name,
+            projectType : ownedProject.type,
+        });
 
-        await markProjectDeleted(projectId,{
-            cleanupCompletedAt: new Date(),
-        })
+        const finalized = await finalizeProjectDeletion(projectId, ownerId);
 
-        return `Project ${projectId} deleted successfully. ${runtimeCleanupMessage}`;
-    }
-   
-    catch(err : unknown){
-        await markProjectFailed(projectId,
-            err instanceof Error ? err.message : "Unknown delete cleanup error",
-        )
-        
-        await prisma.projectRoom.updateMany({
-            where: {
-                projectId,
-                userId: ownerId
-            },
-            data: {
-                vmState: "FAILED"
-            }
-        })
-        if(err instanceof Error){
-            console.error(`Error removing instance ${err.message}`);
+        if(!finalized){
+            return `Deletion still reconciling. ${runtimeCleanupMessage}. ${artifactCleanupMessage}`
         }
 
-        throw new Error("Unknown cleanup error")
+        return `Project ${projectId} deleted successfully. ${runtimeCleanupMessage}. ${artifactCleanupMessage}.`
+    } catch(err : unknown){
+       await markProjectDeletePendingReason(projectId,
+        err instanceof Error ? err.message : "Unknown delete cleanup error"
+       );
+
+       if(err instanceof Error){
+        console.error(`Error removing instance ${err.message}`);
+       }
+       throw err;
     }
 }
 
@@ -411,9 +476,8 @@ const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
     }
 
     await markInstanceTerminating(instanceMetaData.instanceId);
-    await terminateAndScaleDown(instanceMetaData.instanceId, false); // replace bad machine without shrinking the pool
-    await deleteInstanceLifecycle(instanceMetaData.instanceId);
-    
+    await bestEffortTerminateInstance(instanceMetaData.instanceId, false);
+
     return {
         disposition : "TERMINATED" as const,
         message : `Terminated unhealthy instance ${instanceMetaData.instanceId}`
