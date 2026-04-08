@@ -83,7 +83,7 @@ model Project {
   // Members
   members   ProjectRoom[]
 
-  // Same user cannot create 2 projects with same name
+  
   @@index([ownerId,name])
   @@index([ownerId])
   @@index([status])

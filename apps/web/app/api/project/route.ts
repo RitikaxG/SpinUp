@@ -1,10 +1,8 @@
 import { NextResponse, NextRequest } from "next/server";
 import { prisma } from "db/client";
 import { currentUser } from "@clerk/nextjs/server";
-import { vmBootingSetup } from "../../../services/ec2Manager";
-import { cleanUpOwnedProjectInstance } from "../../../services/redisManager";
 import { ProjectSchema } from "../../../lib/validators/project";
-import { markProjectAllocating, markProjectCreated, markProjectDeleting } from "../../../services/projectLifecycleManager";
+import { createOrResumeProject, deleteOrResumeProject } from "../../../services/projectControlPlane";
 
 async function requireDBUser(){
     const clerk = await currentUser();
@@ -59,82 +57,21 @@ export async function POST(req : NextRequest){
         })
     }
 
-    const existingProject = await prisma.project.findFirst({
-        where : {
-            ownerId : auth.dbUser.id,
-            name: parsed.data.name,
-            deletedAt: null
-        }
+    const result = await createOrResumeProject({
+        ownerId: auth.dbUser.id,
+        name : parsed.data.name,
+        type : parsed.data.type,
     })
 
-    if(existingProject){
-        return NextResponse.json({
-            error : "You already have a project with this name",
-        },{
-            status : 409
-        })
-    }
-
-    try{
-         const newProject = await prisma.project.create({
-            data : {
-                name : parsed.data.name,
-                type : parsed.data.type,
-                ownerId: auth.dbUser.id,
-                status:"CREATED"
-            }
-        })
-
-        console.log(newProject);
-
-        // Associate User-Project {userId, projectId}
-        await prisma.projectRoom.create({
-            data : {
-                userId : auth.dbUser.id,
-                projectId : newProject.id
-                }
-        })
-
-        await markProjectCreated(newProject.id);
-        await markProjectAllocating(newProject.id);
-
-        
-        const userId = auth.dbUser.id;
-        const bootResult = await vmBootingSetup(newProject.id,newProject.name, newProject.type, userId);
-
-        const projectSnapshot = await prisma.project.findUnique({
-            where: { id: newProject.id }
-        })
-
-        if(!bootResult){
-            return NextResponse.json({
-                message: "Project created but runtime boot failed",
-                project: projectSnapshot
-            },{
-                status: 500
-            })
-        }
-       
-
-        return NextResponse.json(
-            { 
-                message: "Project created and runtime ready", 
-                project : projectSnapshot,
-                runtime: bootResult
-        } ,
-            { status :  201 },
-
-        )
-    }
-    catch(err : unknown){
-        if(err instanceof Error){
-            return NextResponse.json({
-                message : `Error creating new project ${err.message}`
-            },{
-            status : 500
-            })
-        }
-    }
+    return NextResponse.json({
+        message : result.message,
+        project : result.project,
+        runtime : result.runtime,
+        inProgress : result.inProgress,
+    },{
+        status : result.httpStatus,
+    })
+    
 }
 
 export async function DELETE(req : NextRequest){
@@ -152,59 +89,23 @@ export async function DELETE(req : NextRequest){
         return NextResponse.json({
             message : `ProjectId not provided`
         },{
-            status : 404
+            status : 400
         })
     }
 
-    try{
-        // Check if project belongs to dbUser
-        const ownedProject = await prisma.project.findFirst({
-            where : {
-                ownerId : auth.dbUser.id,
-                id : projectId
-            },
-            select: {
-                id: true,
-                status: true,
-                deletedAt: true
-            }
-        })
+    const result = await deleteOrResumeProject({
+        projectId,
+        ownerId : auth.dbUser.id,
+    });
 
-        if(!ownedProject){
-            return NextResponse.json({
-                message : "You do not have access to this project"
-            },{
-                status : 403
-            })
-        }
-
-        if(ownedProject.status === "DELETED"){
-            return NextResponse.json({
-                message : `Project with id ${projectId} is already deleted`
-            },{
-                status : 200
-            })
-        }
-
-        await markProjectDeleting(projectId);
-
-        // Clean up any instance in redis associated with the projectId
-        const cleanupMessage = await cleanUpOwnedProjectInstance(projectId, auth.dbUser.id);
-
-        return NextResponse.json({
-            message : cleanupMessage
-        },{
-            status : 200
-        })
-
-    }
-    catch(err : unknown){
-        if(err instanceof Error){
-            return NextResponse.json({
-                message : `Failed to delete project with id ${projectId} error : ${err.message}`
-            })
-        }
-    }
+    return NextResponse.json({
+        message: result.message,
+        project: result.project,
+        runtime: result.runtime,
+        inProgress: result.inProgress,
+    },{
+        status : result.httpStatus,
+    })
 }
 
 export async function GET(){
@@ -214,7 +115,6 @@ export async function GET(){
     }
 
     try{
-
         const projects = await prisma.project.findMany({
             where : {
                 ownerId: auth.dbUser.id,

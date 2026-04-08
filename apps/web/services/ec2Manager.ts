@@ -4,7 +4,7 @@ import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
 import { cleanUpOwnedProjectInstance, redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat, cleanupProjectRuntimeAssignment } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
-import { markProjectAllocating, markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle, touchProjectHeartbeat } from "./projectLifecycleManager";
+import { markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle, touchProjectHeartbeat } from "./projectLifecycleManager";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
