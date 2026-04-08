@@ -54,7 +54,7 @@ const transitionProject = async (
 
     // True idempotent retry: same-state patch is allowed and returns immediately.
     if(current.status === nextStatus){
-        await prisma.project.update({
+        return await prisma.project.update({
             where: { id: projectId },
             data: {
                 ...patch
@@ -185,7 +185,7 @@ export const markProjectDeletePendingReason = async (
         })
     }
 
-    if(current.status === "DELETING"){
+    if(current.status !== "DELETING"){
         await markProjectDeleting(projectId);
     }
 

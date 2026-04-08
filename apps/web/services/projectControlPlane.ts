@@ -136,7 +136,10 @@ export const createOrResumeProject = async ({
                 }
             }
 
-            await markProjectAllocating(project.id);
+            if(project.status === "CREATED" || project.status === "FAILED"){
+                await markProjectAllocating(project.id);
+            }
+            
 
             const runtime = await ensureProjectRuntime(
                 project.id,
@@ -210,7 +213,20 @@ export const deleteOrResumeProject = async({
                 }
             }
 
-            await markProjectDeleting(projectId);
+            if(ownedProject.status === "DELETED"){
+                return {
+                    httpStatus: 200,
+                    message: "Project already deleted",
+                    project: ownedProject,
+                    runtime: null,
+                    inProgress: false,
+                };
+            }
+
+            if(ownedProject.status === "DELETING"){
+                await markProjectDeleting(projectId);
+            }
+            
 
             try{
                 await cleanupProjectRuntimeAssignment(projectId, ownerId);
@@ -239,7 +255,7 @@ export const deleteOrResumeProject = async({
                     message : `Project ${projectId} deleted successfully`,
                     project : snapshot.project,
                     runtime : null,
-                    inProgress : false,
+                    inProgress : true,
                 }
             } catch (err ){
                 await markProjectDeletePendingReason(projectId, 

@@ -448,18 +448,34 @@ const pingVmAgent = async(publicIP : string) => {
     }
 }
 
+const buildDeterministicContainerName = (projectId: string) => `spinup-${projectId}`;
+
+const resolveContainerNameForStop = (instanceMetaData: InstanceRecord) => {
+  if (instanceMetaData.containerName) {
+    return instanceMetaData.containerName;
+  }
+
+  if (instanceMetaData.projectId) {
+    return buildDeterministicContainerName(instanceMetaData.projectId);
+  }
+
+  return "";
+};
+
 const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
-    let stopSuceeded = true;
-    if(instanceMetaData.publicIP && instanceMetaData.containerName){
+    const containerNameToStop = resolveContainerNameForStop(instanceMetaData);
+    let stopSuceeded = false;
+
+    if(instanceMetaData.publicIP && containerNameToStop){
         
         try{
             await axios.post(`http://${instanceMetaData.publicIP}:3000/stop`,{
-                containerName : instanceMetaData.containerName
+                containerName : containerNameToStop,
             },{
                 timeout: 5000
             })
+            stopSuceeded = true;
         }catch(err){
-            stopSuceeded = false;
             if(err instanceof Error){
                 console.error(`Failed to stop container for instance ${instanceMetaData.instanceId}: ${err.message}`);
             }
@@ -467,6 +483,8 @@ const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
     }
 
     const vmHealthy = instanceMetaData.publicIP ? await pingVmAgent(instanceMetaData.publicIP) : false;
+
+    // Only recycle if we positively stopped the container and the VM is healthy.
     if(stopSuceeded && vmHealthy){
         await writeIdleInstance(instanceMetaData.instanceId);
         return {
@@ -480,7 +498,7 @@ const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
 
     return {
         disposition : "TERMINATED" as const,
-        message : `Terminated unhealthy instance ${instanceMetaData.instanceId}`
+        message : `Terminated unhealthy instance ${instanceMetaData.instanceId} instead of recycling it.`
     }
 }
 
