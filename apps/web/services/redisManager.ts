@@ -626,7 +626,7 @@ export const incrementHeartbeatFailure = async (
     if(!existing) return null;
 
     const nextFailures = Number(existing.heartbeatFailures ?? "0") + 1;
-    const now = Date.now.toString();
+    const now = Date.now().toString();
 
     const updated : InstanceRecord = {
         ...existing,
@@ -635,7 +635,7 @@ export const incrementHeartbeatFailure = async (
         lastHealthError : error,
     }
 
-    redis.hset(redisKeys.instance(instanceId),updated);
+    await redis.hset(redisKeys.instance(instanceId),updated);
     return nextFailures;
     
 }

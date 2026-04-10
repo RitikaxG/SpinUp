@@ -23,7 +23,7 @@ async function main(){
         const elapsed = Date.now() - startedAt;
         const delay = Math.max(0, CONTROL_PLANE_INTERVAL_MS - elapsed);
 
-        return sleep(delay);
+        await sleep(delay);
     }
 }
 

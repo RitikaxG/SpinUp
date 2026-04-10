@@ -132,7 +132,12 @@ export const recoverProjectRuntime = async(
         async () => {
             const latestProjectMapping = await getInstanceIdForProject(instance.projectId);
 
-            if(!latestProjectMapping && latestProjectMapping !== instance.instanceId){
+            if (!latestProjectMapping) {
+                await deleteInstanceLifecycle(instance.instanceId);
+                return false;
+            }
+
+            if (latestProjectMapping !== instance.instanceId) {
                 await deleteInstanceLifecycle(instance.instanceId);
                 return false;
             }
