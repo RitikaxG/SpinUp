@@ -85,20 +85,25 @@ export type InstanceRecord = {
     inUse : "true" | "false",
     allocatedAt : string,
     lastHeartbeatAt : string,
+    lastHealthCheckAt : string,
+    lastHealthError : string,
+    heartbeatFailures : string,
     status : InstanceStatus
 }
 
 export const redisKeys = {
     instance : (instanceId : string) => `instance:${instanceId}`,
     userInstance: (userId : string) => `user:${userId}:instance`,
-    projectInstance: (projectId : string) => `project:${projectId}:instance`
+    projectInstance: (projectId : string) => `project:${projectId}:instance`,
+    activeAssignedInstances : "instances:active" ,
 }
 
 export const controlPlaneLockKeys = {
     createProject : (ownerId : string, normalizedName: string ) => 
         `lock:project:create:${ownerId}:${normalizedName.toLowerCase()}`,
     deleteProject: (projectId : string ) => `lock:project:delete:${projectId}`,
-    runtime : (projectId : string) => `lock:project:runtime:${projectId}`
+    runtime : (projectId : string) => `lock:project:runtime:${projectId}`,
+    tick: () => `lock:control-plane:tick`,
 } as const;
 
 export const CONTROL_PLANE_LOCK_TTL_MS = 30_000;
@@ -115,6 +120,9 @@ const toInstanceRecord = (data: Record<string,string>): InstanceRecord => {
         inUse: data.inUse === "true" ? "true" : "false",
         allocatedAt: data.allocatedAt ?? "",
         lastHeartbeatAt: data.lastHeartbeatAt ?? "",
+        lastHealthCheckAt : data.lastHealthCheckAt ?? "",
+        lastHealthError : data.lastHealthError ?? "",
+        heartbeatFailures : data.heartbeatFailures ?? "0",
         status : (data.status as InstanceStatus) ?? "FAILED"
     }
 }
@@ -169,6 +177,9 @@ export const writeBootingInstance = async ({
         inUse: "true",
         allocatedAt: now,
         lastHeartbeatAt: now,
+        lastHealthCheckAt : now,
+        lastHealthError : "",
+        heartbeatFailures : "0",
         status: "BOOTING"
     };
 
@@ -176,6 +187,7 @@ export const writeBootingInstance = async ({
         .hset(redisKeys.instance(instanceId),record) // full instance metadata
         .set(redisKeys.userInstance(userId),instanceId) // user-instance mapping
         .set(redisKeys.projectInstance(projectId),instanceId) // project-instance mapping
+        .sadd(redisKeys.activeAssignedInstances,instanceId)
         .exec();
 
     return record;
@@ -211,6 +223,9 @@ export const writeRunningInstance = async({
         inUse: "true",
         allocatedAt: now,
         lastHeartbeatAt: now,
+        lastHealthCheckAt : now,
+        lastHealthError : "",
+        heartbeatFailures : "0",
         status: "RUNNING"
     };
 
@@ -218,6 +233,7 @@ export const writeRunningInstance = async({
         .hset(redisKeys.instance(instanceId),record)
         .set(redisKeys.userInstance(userId),instanceId)
         .set(redisKeys.projectInstance(projectId),instanceId)
+        .sadd(redisKeys.activeAssignedInstances,instanceId)
         .exec()
 
     return record;
@@ -241,6 +257,9 @@ export const writeIdleInstance = async (instanceId : string) => {
         inUse: "false",
         allocatedAt: "",
         lastHeartbeatAt: now,
+        lastHealthCheckAt : now,
+        lastHealthError :"",
+        heartbeatFailures : "0",
         status: "IDLE"
     }
 
@@ -248,6 +267,7 @@ export const writeIdleInstance = async (instanceId : string) => {
         .del(redisKeys.userInstance(existing.userId))
         .del(redisKeys.projectInstance(existing.projectId))
         .hset(redisKeys.instance(instanceId),idleRecord)
+        .srem(redisKeys.activeAssignedInstances,instanceId)
         .exec()
 
     return idleRecord;
@@ -305,7 +325,11 @@ export const deleteInstanceMappings = async (record : {
 }
 
 export const deleteInstanceRecord = async (instanceId : string) => {
-    await redis.del(redisKeys.instance(instanceId));
+    await redis
+        .multi()
+        .del(redisKeys.instance(instanceId))
+        .srem(redisKeys.activeAssignedInstances, instanceId)
+        .exec();
 }
 
 // Combined Cleanup
@@ -321,6 +345,7 @@ export const deleteInstanceLifecycle = async (instanceId : string) => {
         .del(redisKeys.instance(instanceId))
         .del(redisKeys.userInstance(existing.userId))
         .del(redisKeys.projectInstance(existing.projectId))
+        .srem(redisKeys.activeAssignedInstances,instanceId)
         .exec()
 }
 
@@ -591,3 +616,47 @@ export const cleanupProjectRuntimeAssignment = async (
 
   return `${instanceId} associated with ${projectId} successfully cleaned up. ${result.message}`;
 };
+
+export const incrementHeartbeatFailure = async (
+    instanceId : string,
+    error : string,
+) : Promise<number | null> => {
+
+    const existing = await getInstance(instanceId);
+    if(!existing) return null;
+
+    const nextFailures = Number(existing.heartbeatFailures ?? "0") + 1;
+    const now = Date.now.toString();
+
+    const updated : InstanceRecord = {
+        ...existing,
+        heartbeatFailures : nextFailures.toString(),
+        lastHealthCheckAt : now,
+        lastHealthError : error,
+    }
+
+    redis.hset(redisKeys.instance(instanceId),updated);
+    return nextFailures;
+    
+}
+
+export const listActiveAssignedInstanceIds = async() : Promise<string[]> => {
+    return redis.smembers(redisKeys.activeAssignedInstances)
+}
+
+export const resetHeartbeatFailure = async ( instanceId : string ) => {
+    const existing = await getInstance(instanceId);
+    if(!existing) return null;
+
+    const now = Date.now().toString();
+
+    const updated : InstanceRecord = {
+        ...existing,
+        lastHealthCheckAt : now,
+        lastHealthError : "",
+        heartbeatFailures : "0",
+    };
+
+    await redis.hset(redisKeys.instance(instanceId),updated);
+    return updated;
+}

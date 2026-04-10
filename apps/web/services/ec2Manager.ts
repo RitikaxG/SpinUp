@@ -1,10 +1,10 @@
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
-import { redis, getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, updateInstanceHeartbeat, cleanupProjectRuntimeAssignment } from "./redisManager";
+import { getInstanceIdForUser, getInstanceIdForProject, getInstance, deleteInstanceLifecycle, deleteInstanceMappings, deleteInstanceRecord, writeRunningInstance, writeBootingInstance, cleanupProjectRuntimeAssignment } from "./redisManager";
 import axios from "axios";
 import { prisma } from "db/client";
-import { markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle, touchProjectHeartbeat } from "./projectLifecycleManager";
+import { markProjectBooting, markProjectFailed, markProjectReady, patchProjectLifecycle } from "./projectLifecycleManager";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -358,125 +358,4 @@ export const ensureProjectRuntime = async (
     }
 }
 
-export const heartBeat = async () => {
-    
-    const instances = await redis.keys("instance:*");
-    console.log(`Heartbeat check for ${instances.length} instances...`);
-
-    for(const instanceKey of instances){
-        const instanceId = instanceKey.split(":")[1];
-
-        if (!instanceId) {
-        continue;
-        }
-        const instanceMetaData = await getInstance(instanceId);
-        if(!instanceMetaData){
-            await deleteInstanceRecord(instanceId);
-            continue;
-        }
-
-        // Only actively running allocations need container/health checks
-        if (instanceMetaData.status !== "RUNNING") {
-        continue;
-        }
-
-        const containerName = instanceMetaData.containerName;
-        const publicIP      = instanceMetaData.publicIP;
-        const projectId     = instanceMetaData.projectId;
-
-        if(!containerName || !publicIP || !projectId || !instanceId){
-            console.error(`Skipping ${instanceId} : missing data in redis`);
-
-            if (projectId) {
-                const project = await prisma.project.findUnique({
-                where: { id: projectId },
-                select: { ownerId: true },
-                });
-
-                if (project) {
-                    await cleanupProjectRuntimeAssignment(projectId, project.ownerId);
-                } else {
-                await deleteInstanceLifecycle(instanceId);
-                }
-            } 
-            
-            else {
-                await deleteInstanceLifecycle(instanceId);
-            }
-
-            continue;
-        }
-
-
-        let shouldTerminate = false;
-        // Check container status
-        try{
-            const containerStatus = await axios.post(`http://${publicIP}:3000/containerStatus`,{
-                containerName
-            },{
-                timeout : 5000
-            });
-
-            if(containerStatus.data.status === "stopped"){
-                console.log(`Terminating instance ${instanceId} since containerStatus is stopped..`)
-                shouldTerminate = true;
-            }
-        }
-        catch(err : unknown){
-            if(err instanceof Error){
-                console.error(`Error checking container status for ${instanceId} terminating instance ${err.message}...`);
-                shouldTerminate = true;
-            }
-            
-        }
-        
-        // Heath Check
-        try{
-            const healthCheck = await axios.get(`http://${publicIP}:3000/health`,{
-                timeout : 5000
-            });
-            if(healthCheck.data !== "OK"){
-                console.error(`Heath check failed for ${instanceId}`);
-                shouldTerminate = true
-            }
-        }
-        catch(err : unknown){
-            if(err instanceof Error){
-                console.error(`Heath check request failed for ${instanceId}: ${err.message}`);
-                shouldTerminate = true;
-            }
-        }
-
-        if(shouldTerminate){
-            console.log(`Cleaning up unhealthy instance ${instanceId}...`);
-
-            const project = await prisma.project.findUnique({
-                where: {
-                    id : projectId,
-                },
-                select: {
-                    ownerId: true
-                }
-            })
-
-            if(!project){
-                console.error(`Skipping cleanup for projectId ${projectId} project not found in DB`);
-                await deleteInstanceLifecycle(instanceId);
-                continue;
-            }
-            await markProjectFailed(projectId,"Heartbeat recovery cleanup triggered",{
-                assignedInstanceId: null,
-                containerName: null,
-                publicIp: null,
-                lastHeartbeatAt: null
-            })
-
-            await cleanupProjectRuntimeAssignment(projectId, project.ownerId);
-            continue;
-        }  
-
-        await updateInstanceHeartbeat(instanceId);
-        await touchProjectHeartbeat(projectId);
-    }
-}
 

@@ -3,7 +3,31 @@ import { ensureProjectRuntime, RuntimeAssignment } from "./ec2Manager";
 import { prisma } from "db/client";
 import { getInstanceIdForProject, getInstance, withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, cleanupProjectRuntimeAssignment, cleanupProjectArtifacts, finalizeProjectDeletion } from "./redisManager";
 import { markProjectAllocating, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
+import { PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
 
+const withProjectRuntimeLock = async<T>(
+    projectId : string,
+    fn : () => Promise<T>,
+) : Promise< {lockAcquired : true ; value : T } | {lockAcquired : false }> => {
+
+    const result = await withDistributedLock(
+        controlPlaneLockKeys.runtime(projectId),
+        PROJECT_RUNTIME_LOCK_TTL_MS,
+        async () => {
+            const value = await fn();
+            return { value }
+        }
+    );
+
+    if(!result){
+        return { lockAcquired : false };
+    }
+
+    return {
+        lockAcquired : true,
+        value : result.value,
+    }
+}
 
 const normalizeProjectName = (name : string) => name.trim().replace(/\s+/g, " ");
 
@@ -141,12 +165,23 @@ export const createOrResumeProject = async ({
             }
             
 
-            const runtime = await ensureProjectRuntime(
-                project.id,
-                project.name,
-                project.type,
-                ownerId,
-            )
+            const runtimeResult = await withProjectRuntimeLock(project.id,() => 
+                ensureProjectRuntime(project.id, project.name, project.type , ownerId)
+            );
+
+            if(!runtimeResult.lockAcquired){
+                const snapshot = await getProjectSnapshot(project.id);
+
+                return {
+                    httpStatus : 202,
+                    message: "Project runtime reconciliation already in progress",
+                    project: snapshot.project,
+                    runtime: snapshot.runtime,
+                    inProgress: true,
+                }
+            };
+
+            const runtime = runtimeResult.value;
 
             const snapshot = await getProjectSnapshot(project.id);
 
@@ -229,7 +264,21 @@ export const deleteOrResumeProject = async({
             
 
             try{
-                await cleanupProjectRuntimeAssignment(projectId, ownerId);
+                const cleanupResult = await withProjectRuntimeLock(projectId, () => 
+                    cleanupProjectRuntimeAssignment(projectId,ownerId), 
+                );
+
+                if(!cleanupResult.lockAcquired){
+                    const snapshot = await getProjectSnapshot(projectId);
+
+                    return {
+                        httpStatus: 202,
+                        message: "Project runtime cleanup already in progress",
+                        project: snapshot.project,
+                        runtime: snapshot.runtime,
+                        inProgress: true,
+                    }
+                }
 
                 await cleanupProjectArtifacts({
                     projectId,
