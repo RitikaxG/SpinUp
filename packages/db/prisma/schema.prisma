@@ -12,6 +12,24 @@ datasource db {
   provider = "postgresql"
 }
 
+enum ProjectEventType {
+  PROJECT_CREATED
+  ALLOCATION_STARTED
+  INSTANCE_ASSIGNED
+  CONTAINER_BOOT_STARTED
+  CONTAINER_BOOT_SUCCEEDED
+  CONTAINER_BOOT_FAILED
+  HEARTBEAT_OK
+  HEARTBEAT_FAILED
+  RUNTIME_RECOVERY_STARTED
+  RUNTIME_RECOVERY_COMPLETED
+  DELETE_STARTED
+  RUNTIME_CLEANUP_STARTED
+  RUNTIME_CLEANUP_COMPLETED
+  ARTIFACT_CLEANUP_COMPLETED
+  DELETE_COMPLETED
+}
+
 enum VmState {
   STOPPED
   BOOTING
@@ -76,18 +94,25 @@ model Project {
   cleanupCompletedAt DateTime?
   deletedAt DateTime?
 
+  lastEventType ProjectEventType?
+  lastEventMessage String?
+  lastEventAt DateTime?
 
   // Actual owner of the project
   owner User @relation("ProjectOwner",fields: [ownerId], references: [id], onDelete: Cascade)
 
   // Members
   members   ProjectRoom[]
-
+  events   ProjectEvent[]
   
   @@index([ownerId,name])
   @@index([ownerId])
   @@index([status])
   @@index([ownerId,status])
+
+  @@index([assignedInstanceId])
+  @@index([deletedAt,status])
+  @@index([ownerId,deletedAt,status])
 }
 
 // Each User-Project link is stored here
@@ -105,6 +130,26 @@ model ProjectRoom {
   @@unique([userId,projectId], name : "userId_projectId")
   @@index([projectId])
   @@index([userId])
+}
+
+model ProjectEvent {
+  id String @id @default(cuid())
+  projectId String
+  ownerId String
+  eventType ProjectEventType
+  fromStatus ProjectLifecycleStatus?
+  toStatus ProjectLifecycleStatus?
+  message String?
+  instanceId String?
+  publicIp String?
+  containerName String?
+  metadata Json?
+  createdAt DateTime @default(now())
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([ projectId, createdAt])
+  @@index([projectId,eventType, createdAt])
+  @@index([instanceId, createdAt])
 }
 
 // Project.ownerId - who controls lifecycle
