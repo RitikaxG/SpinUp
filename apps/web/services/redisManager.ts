@@ -2,16 +2,18 @@ import Redis from "ioredis";
 import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import axios from "axios";
 import { deleteS3Object } from "../lib/aws/s3Commands";
-const REDIS_URL = process.env.REDIS_URL as string;
 import { prisma } from "db/client";
 import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
+import { string } from "zod";
+import { stat } from "fs";
+import { clearProjectAssignmentSnapshot, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 
+const REDIS_URL = process.env.REDIS_URL as string;
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");
 }
-
 
 export const redis = new Redis(REDIS_URL);
 
@@ -239,6 +241,78 @@ export const writeRunningInstance = async({
     return record;
 }
 
+export const mirrorProjectAssignmentToRedis = async({
+    instanceId,
+    userId,
+    projectId,
+    projectName,
+    projectType,
+    publicIP,
+    containerName,
+    status,
+}:{
+    instanceId : string,
+    userId : string,
+    projectId : string,
+    projectName : string,
+    projectType : ProjectTypeValue,
+    publicIP : string,
+    containerName : string,
+    status : "BOOTING" | "RUNNING",
+}) => {
+    if(status === "BOOTING"){
+        return writeBootingInstance({
+            instanceId,
+            userId,
+            projectId,
+            projectName,
+            projectType,
+            publicIP,
+        });
+    }
+
+    return writeRunningInstance({
+        instanceId,
+        userId,
+        projectId,
+        projectName,
+        projectType,
+        publicIP,
+        containerName,
+    })
+};
+
+export const rehydrateProjectRuntimeRedis = async(projectId : string) => {
+    const snapshot = await getProjectRuntimeSnapshot(projectId);
+
+    if(!snapshot.project){
+        return null;
+    };
+
+    const project = snapshot.project;
+
+    if(!project.assignedInstanceId || !project.publicIp
+        || (project.status !== "BOOTING_CONTAINER" && project.status !== "READY")
+    ){
+        return null;
+    }
+
+    const containerName = project.containerName ?? "";
+
+    await mirrorProjectAssignmentToRedis({
+        instanceId : project.assignedInstanceId,
+        userId : project.ownerId,
+        projectId : project.id,
+        projectName : project.name,
+        projectType : project.type,
+        publicIP : project.publicIp,
+        containerName,
+        status : project.status === "READY" ? "RUNNING" : "BOOTING",
+    });
+
+    return true;
+}
+
 export const writeIdleInstance = async (instanceId : string) => {
     const existing = await getInstance(instanceId);
     if(!existing){
@@ -388,12 +462,36 @@ export const finalizeProjectDeletion = async (
     projectId : string,
     ownerId : string
 ) => {
-    const lingeringProjectMapping = await getInstanceIdForProject(projectId);
-    if(lingeringProjectMapping){
+    const project = await prisma.project.findFirst({
+        where : { id : projectId, ownerId },
+        select : {
+            id : true,
+            status : true,
+            assignedInstanceId : true,
+            publicIp : true,
+            containerName : true,
+        }
+    });
+
+    if(!project){
+        throw new Error("Project not found or user does not own the project.")
+    }
+
+    if(project.status !== "DELETING"){
         await markProjectDeletePendingReason(
             projectId,
-            `Deletion not finalised : project mapping still points to instance ${lingeringProjectMapping}`
-        );
+            `Deletion not finalised: project status is ${project.status}, expected DELETING`,
+        )
+        return null;
+    }
+    
+    if(
+        project.assignedInstanceId || project.publicIp || project.containerName
+    ){
+        await markProjectDeletePendingReason(
+            projectId,
+            "Deletion not finalised: DB still shows active runtime assignment",
+        )
         return null;
     }
 
@@ -541,6 +639,11 @@ export const cleanupProjectRuntimeAssignment = async (
     select: {
       id: true,
       ownerId: true,
+      name : true,
+      type : true,
+      assignedInstanceId : true,
+      publicIp : true,
+      containerName : true,
     },
   });
 
@@ -558,13 +661,15 @@ export const cleanupProjectRuntimeAssignment = async (
     },
   });
 
-  const instanceId = await getInstanceIdForProject(projectId);
+  const instanceId = ownedProject.assignedInstanceId;
 
   if (!instanceId) {
     await deleteInstanceMappings({
       userId: ownerId,
       projectId,
     });
+
+    await clearProjectAssignmentSnapshot(projectId);
 
     await prisma.projectRoom.updateMany({
       where: {
@@ -579,30 +684,33 @@ export const cleanupProjectRuntimeAssignment = async (
     return `No active instance for project ${projectId}`;
   }
 
-  const instanceMetaData = await getInstance(instanceId);
+  const rediseMetaData = await getInstance(instanceId);
 
-  if (!instanceMetaData) {
-    await deleteInstanceMappings({
-      userId: ownerId,
-      projectId,
-    });
-
-    await deleteInstanceRecord(instanceId);
-
-    await prisma.projectRoom.updateMany({
-      where: {
-        projectId,
-        userId: ownerId,
-      },
-      data: {
-        vmState: "STOPPED",
-      },
-    });
-
-    return `No metadata found for instance ${instanceId}`;
+  const instanceMetaData : InstanceRecord = rediseMetaData ?? {
+    instanceId,
+    userId : ownerId,
+    projectId,
+    projectName : ownedProject.name,
+    projectType : ownedProject.type,
+    publicIP : ownedProject.publicIp ?? "",
+    containerName : ownedProject.containerName ?? "",
+    inUse : "true",
+    allocatedAt : "",
+    lastHeartbeatAt : "",
+    lastHealthCheckAt : "",
+    lastHealthError : "",
+    heartbeatFailures : "0",
+    status: "RUNNING"
   }
 
   const result = await recycleInstanceIfHealthy(instanceMetaData);
+
+  await clearProjectAssignmentSnapshot(projectId);
+
+  await deleteInstanceMappings({
+    userId : ownerId,
+    projectId,
+  })
 
   await prisma.projectRoom.updateMany({
     where: {
