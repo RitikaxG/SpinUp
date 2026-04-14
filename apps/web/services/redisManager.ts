@@ -5,8 +5,6 @@ import { deleteS3Object } from "../lib/aws/s3Commands";
 import { prisma } from "db/client";
 import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
-import { string } from "zod";
-import { stat } from "fs";
 import { clearProjectAssignmentSnapshot, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 
 const REDIS_URL = process.env.REDIS_URL as string;

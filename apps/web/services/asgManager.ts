@@ -4,6 +4,7 @@ import { markProjectFailed } from "./projectLifecycleManager";
 import { InstanceStatus, getInstance, deleteInstanceLifecycle, withDistributedLock } from "./redisManager";
 import { prisma } from "db/client";
 import { AUTOSCALING_CONFIG } from "../lib/autoscaling/config";
+import { getAssignedProjectByInstanceId, listBusyInstanceIds } from "./projectRuntimeTruthSource";
 
 interface InstanceInfo {
     InstanceId? : string;
@@ -11,7 +12,9 @@ interface InstanceInfo {
     HealthStatus? : string;
     inUse? : boolean; 
     status? : InstanceStatus | "UNTRACKED"
-    lastHeartbeatAt? : number
+    lastHeartbeatAt? : number;
+    dbAssignedProjectId?: string | null;
+    dbAssignedStatus?: string | null;
 }
 
 export type ScalingSnapshot = {
@@ -46,6 +49,9 @@ const isIdleCandidate = (instance : InstanceInfo) => {
 export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) : Promise<InstanceInfo[]> => {
     const state = groupState ?? (await getAutoScalingGroupState());
 
+    const busyInstanceIds = await listBusyInstanceIds();
+    const busySet = busyInstanceIds;
+
     const instanceDetails = await Promise.all(
         state.instances.map(async (instance): Promise<InstanceInfo> => {
 
@@ -57,19 +63,27 @@ export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) 
                 HealthStatus: instance.HealthStatus,
                 inUse: false,
                 status: "UNTRACKED",
-                lastHeartbeatAt: 0
+                lastHeartbeatAt: 0,
+                dbAssignedProjectId: null,
+                dbAssignedStatus: null,
             }
         }
 
         const redisRecord = await getInstance(instanceId);
-    
+
+        const assignedProject = busySet.has(instanceId)
+        ? await getAssignedProjectByInstanceId(instanceId)
+        : null;
+
         return {
             InstanceId : instanceId,
             LifecycleState : instance.LifecycleState,
             HealthStatus : instance.HealthStatus,
             inUse : redisRecord ? redisRecord.inUse === "true" : false,
             status: redisRecord?.status ?? "UNTRACKED",
-            lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0)
+            lastHeartbeatAt : Number(redisRecord?.lastHeartbeatAt ?? 0),
+            dbAssignedProjectId: assignedProject?.id ?? null,
+            dbAssignedStatus: assignedProject?.status ?? null,
         }
         })
     ) 
@@ -78,6 +92,11 @@ export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) 
 }
 
 const terminateIdleInstance = async ( instanceId : string, reason : string ) : Promise<boolean> => {
+  const assignedProject = await getAssignedProjectByInstanceId(instanceId);
+  if (assignedProject) {
+    return false;
+  }
+
   const redisRecord = await getInstance(instanceId);
   if(redisRecord?.inUse === "true"){
     return false;
@@ -278,28 +297,29 @@ export const terminatingUnhealthyInstances = async () => {
     }
 
     const instanceId = instance.InstanceId;
-    const redisRecord = await getInstance(instanceId);
+    const assignedProject = await getAssignedProjectByInstanceId(instanceId);
 
     try {
       // 1) Reflect failure in DB if this unhealthy instance was assigned
-      if (redisRecord?.projectId && redisRecord?.userId) {
+      if (assignedProject) {
         await prisma.projectRoom.updateMany({
           where: {
-            projectId: redisRecord.projectId,
-            userId: redisRecord.userId,
+            projectId: assignedProject.id,
+            userId: assignedProject.ownerId,
           },
           data: {
             vmState: "FAILED",
           },
         });
 
-        await markProjectFailed(redisRecord.projectId,
+        await markProjectFailed(assignedProject.id,
             "ASG instance became unhealthy",{
                 assignedInstanceId: null,
                 containerName: null,
                 publicIp: null,
                 lastHeartbeatAt: null
-            }
+            },
+            "RUNTIME_RECOVERY_STARTED"
         )
       }
 
@@ -360,7 +380,6 @@ export const reconcileAutoScaling = async () => {
     recycledIdleInstanceIds : []
   }
 }
-
 
 
 export const reconcileWarmPool = async () => {

@@ -1,7 +1,7 @@
 import { Project, ProjectType } from "db/client";
 import { ensureProjectRuntime, RuntimeAssignment } from "./ec2Manager";
 import { prisma } from "db/client";
-import { getInstanceIdForProject, getInstance, withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, cleanupProjectRuntimeAssignment, cleanupProjectArtifacts, finalizeProjectDeletion } from "./redisManager";
+import { withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, cleanupProjectRuntimeAssignment, cleanupProjectArtifacts, finalizeProjectDeletion } from "./redisManager";
 import { markProjectAllocating, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
 
@@ -42,43 +42,32 @@ type ControlPlaneResponse = {
 const getProjectSnapshot = async (
     projectId : string) : Promise< { project : Project | null; runtime : RuntimeAssignment | null}> => {
 
-    const project = await prisma.project.findUnique({
-        where : { id : projectId }
-    });
-
-    if(!project){
+    const snapshot = await getProjectSnapshot(projectId);
+    if(!snapshot.project){
         return {
             project : null,
             runtime : null,
         }
-    }
+    } 
 
-    const instanceId = await getInstanceIdForProject(projectId);
-    const instance = instanceId ? await getInstance(instanceId) : null;
-
-    if(instance &&
-        instance.instanceId &&
-        instance.publicIP &&
-        instance.containerName &&
-        instance.projectId === projectId
-    ) {
+    if(!snapshot.runtime){
         return {
-            project,
-            runtime : {
-                userId : instance.userId,
-                instanceId : instance.instanceId,
-                publicIP : instance.publicIP,
-                projectId : instance.projectId,
-                projectName : instance.projectName,
-                projectType : instance.projectType as ProjectType,
-                containerName : instance.containerName,
-            }
+            project : snapshot.project,
+            runtime : null,
         }
     }
 
     return {
-        project,
-        runtime : null,
+        project : snapshot.project,
+        runtime : {
+            userId : snapshot.runtime.userId,
+            instanceId: snapshot.runtime.instanceId,
+            publicIP: snapshot.runtime.publicIP,
+            projectId: snapshot.runtime.projectId,
+            projectName: snapshot.runtime.projectName,
+            projectType: snapshot.runtime.projectType,
+            containerName: snapshot.runtime.containerName ?? "",
+        }
     }
 };
 
@@ -114,13 +103,17 @@ export const createOrResumeProject = async ({
                 }
 
                 createdByThisRequest = true;
+                const now = new Date();
 
                 const created = await tx.project.create({
                     data : {
                         name : normalizedName,
                         type,
                         ownerId,
-                        status : "CREATED"
+                        status : "CREATED",
+                        lastEventType : "PROJECT_CREATED",
+                        lastEventMessage : "Project created",
+                        lastEventAt : now,
                     }
                 });
 
@@ -130,6 +123,17 @@ export const createOrResumeProject = async ({
                         projectId : created.id,
                     }
                 });
+
+                await tx.projectEvent.create({
+                    data : {
+                        projectId : created.id,
+                        ownerId,
+                        eventType : "PROJECT_CREATED",
+                        fromStatus : "CREATED",
+                        toStatus : "CREATED",
+                        message : "Project created",
+                    }
+                })
 
                 return created;
             });
@@ -160,6 +164,21 @@ export const createOrResumeProject = async ({
                 }
             }
 
+            if (
+                project.status === "BOOTING_CONTAINER" ||
+                project.status === "ALLOCATING_VM"
+            ) {
+                const snapshot = await getProjectSnapshot(project.id);
+
+                return {
+                httpStatus: 202,
+                message: "Project runtime provisioning is already in progress",
+                project: snapshot.project,
+                runtime: snapshot.runtime,
+                inProgress: true,
+                };
+            }
+
             if(project.status === "CREATED" || project.status === "FAILED"){
                 await markProjectAllocating(project.id);
             }
@@ -182,16 +201,15 @@ export const createOrResumeProject = async ({
             };
 
             const runtime = runtimeResult.value;
-
             const snapshot = await getProjectSnapshot(project.id);
 
             if(!runtime){
                 return {
-                    httpStatus : 500,
-                    message : "Project exists but runtime provisioning failed",
+                    httpStatus : 202,
+                    message : "Project exists but runtime provisioning",
                     project : snapshot.project,
                     runtime : snapshot.runtime,
-                    inProgress : false,
+                    inProgress : true,
                 }
             }
 
@@ -259,8 +277,17 @@ export const deleteOrResumeProject = async({
             }
 
             if(ownedProject.status === "DELETING"){
-                await markProjectDeleting(projectId);
+                const snapshot = await getProjectSnapshot(projectId);
+                return {
+                    httpStatus: 202,
+                    message: "Project deletion is already in progress",
+                    project: snapshot.project,
+                    runtime: snapshot.runtime,
+                    inProgress: true,
+                }
             }
+
+            await markProjectDeleting(projectId);
             
 
             try{
@@ -294,8 +321,8 @@ export const deleteOrResumeProject = async({
                         httpStatus : 202,
                         message : "Delete accepted but cleanup is still reconciling",
                         project : snapshot.project,
-                        runtime : null,
-                        inProgress : false,
+                        runtime : snapshot.runtime,
+                        inProgress : true,
                     }
                 }
 

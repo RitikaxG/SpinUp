@@ -1,8 +1,9 @@
 import axios from "axios";
-import { cleanupProjectRuntimeAssignment, controlPlaneLockKeys, deleteInstanceLifecycle, getInstance, getInstanceIdForProject, incrementHeartbeatFailure, InstanceRecord, listActiveAssignedInstanceIds, resetHeartbeatFailure, updateInstanceHeartbeat, withDistributedLock } from "./redisManager";
+import { cleanupProjectRuntimeAssignment, controlPlaneLockKeys, deleteInstanceLifecycle, getInstance, incrementHeartbeatFailure, InstanceRecord, resetHeartbeatFailure, updateInstanceHeartbeat, withDistributedLock } from "./redisManager";
 import { CONTAINER_STATUS_TIMEOUT_MS, HEALTH_TIMEOUT_MS, HEARTBEAT_FAILURE_THRESHOLD, PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
 import { markProjectFailed, touchProjectHeartbeat } from "./projectLifecycleManager";
 import { prisma } from "db/client";
+import { appendProjectEvent, getAssignedProjectByInstanceId, listActiveProjectAssignments } from "./projectRuntimeTruthSource";
 
 type HealthSeverity = "SOFT" | "HARD";
 
@@ -20,21 +21,40 @@ export type HeartbeatRunSummary = {
     errors : number,
 };
 
-export const listActiveAssignedInstances = async() : Promise<InstanceRecord[]> => {
-    const instanceIds = await listActiveAssignedInstanceIds();
-    const records = await Promise.all(instanceIds.map((instanceId) => getInstance(instanceId)))
+export const listActiveAssignedInstances = async (): Promise<InstanceRecord[]> => {
+  const assignments = await listActiveProjectAssignments();
 
-    return records.filter((record): record is InstanceRecord => {
-        return Boolean(
-            record &&
-            record.inUse === "true" &&
-            record.projectId &&
-            record.userId &&
-            record.publicIP &&
-            record.status === "RUNNING"
-        )
+  const redisRecords = await Promise.all(
+    assignments.map((assignment) => getInstance(assignment.assignedInstanceId)),
+  );
+
+  return assignments
+    .map((assignment, index) => {
+      const redisRecord = redisRecords[index];
+
+      return {
+        instanceId: assignment.assignedInstanceId,
+        userId: assignment.ownerId,
+        projectId: assignment.projectId,
+        projectName: assignment.projectName,
+        projectType: assignment.projectType,
+        publicIP: assignment.publicIp ?? "",
+        containerName: assignment.containerName ?? "",
+        inUse: "true",
+        allocatedAt: "",
+        lastHeartbeatAt: String(
+          redisRecord?.lastHeartbeatAt ??
+            assignment.lastHeartbeatAt?.getTime() ??
+            Date.now(),
+        ),
+        lastHealthCheckAt: redisRecord?.lastHealthCheckAt ?? "",
+        lastHealthError: redisRecord?.lastHealthError ?? "",
+        heartbeatFailures: redisRecord?.heartbeatFailures ?? "0",
+        status: assignment.status === "READY" ? "RUNNING" : "BOOTING",
+      } satisfies InstanceRecord;
     })
-}
+    .filter((record) => Boolean(record.publicIP));
+};
 
 export const checkRuntimeHealth = async(
     instance : InstanceRecord
@@ -130,14 +150,8 @@ export const recoverProjectRuntime = async(
         controlPlaneLockKeys.runtime(instance.projectId),
         PROJECT_RUNTIME_LOCK_TTL_MS,
         async () => {
-            const latestProjectMapping = await getInstanceIdForProject(instance.projectId);
-
-            if (!latestProjectMapping) {
-                await deleteInstanceLifecycle(instance.instanceId);
-                return false;
-            }
-
-            if (latestProjectMapping !== instance.instanceId) {
+            const assignedProject = await getAssignedProjectByInstanceId(instance.instanceId);
+             if (!assignedProject || assignedProject.id !== instance.projectId) {
                 await deleteInstanceLifecycle(instance.instanceId);
                 return false;
             }
@@ -149,20 +163,46 @@ export const recoverProjectRuntime = async(
 
             if(!project){
                 await deleteInstanceLifecycle(instance.instanceId);
-                return null;
+                return false;
             }
+
+            await appendProjectEvent({
+                projectId: project.id,
+                ownerId: project.ownerId,
+                eventType: "RUNTIME_RECOVERY_STARTED",
+                message: reason,
+                instanceId: instance.instanceId,
+                publicIp: instance.publicIP,
+                containerName: instance.containerName,
+                fromStatus: project.status,
+                toStatus: project.status,
+            })
 
             await markProjectFailed(instance.projectId, reason, {
                 assignedInstanceId : null,
                 containerName : null,
                 publicIp : null,
                 lastHeartbeatAt : null,
-            });
+            },
+            "HEARTBEAT_FAILED");
 
             await cleanupProjectRuntimeAssignment(instance.projectId, project.ownerId);
+
+            await appendProjectEvent({
+                projectId: project.id,
+                ownerId: project.ownerId,
+                eventType: "RUNTIME_RECOVERY_COMPLETED",
+                message: `Recovered runtime after failure on instance ${instance.instanceId}`,
+                instanceId: instance.instanceId,
+                publicIp: instance.publicIP,
+                containerName: instance.containerName,
+                fromStatus: "FAILED",
+                toStatus: "FAILED",
+            });
+
             return true;
         }
-    )
+    );
     if(!locked){
         return false;
     }
