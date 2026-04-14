@@ -259,8 +259,8 @@ export const ensureProjectRuntime = async (
             await markProjectFailed(projectId,
                 `Unable to start container inside instance ${instanceId} ${err instanceof Error ? err.message : "Unknown error"}`
             ,{
-                assignedInstanceId: instanceId,
-                publicIp: publicIP,
+                assignedInstanceId: null,
+                publicIp: null,
                 containerName: null,
                 lastHeartbeatAt: null,
             })
