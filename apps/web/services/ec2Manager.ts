@@ -151,7 +151,8 @@ export const ensureProjectRuntime = async (
                 ownerId,
                 id: { not : projectId },
                 deletedAt : null,
-                status : { in : ACTIVE_RUNTIME_STATUSES }
+                status : { in : ACTIVE_RUNTIME_STATUSES },
+                assignedInstanceId: { not: null },
             },
             select : {
                 id : true,
@@ -197,6 +198,7 @@ export const ensureProjectRuntime = async (
                 assignedInstanceId: null,
                 publicIp: null,
                 containerName: null,
+                lastHeartbeatAt: null,
                 },
             );
             return null;
@@ -260,6 +262,7 @@ export const ensureProjectRuntime = async (
                 assignedInstanceId: instanceId,
                 publicIp: publicIP,
                 containerName: null,
+                lastHeartbeatAt: null,
             })
             return null;
         }
@@ -299,6 +302,12 @@ export const ensureProjectRuntime = async (
         await markProjectFailed(
             projectId,
             err instanceof Error ? err.message : "Unknown VM booting error",
+            {
+                assignedInstanceId: null,
+                publicIp: null,
+                containerName: null,
+                lastHeartbeatAt: null,
+            }
         );
         throw err;
     }

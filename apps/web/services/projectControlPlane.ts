@@ -4,6 +4,7 @@ import { prisma } from "db/client";
 import { withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, cleanupProjectRuntimeAssignment, cleanupProjectArtifacts, finalizeProjectDeletion } from "./redisManager";
 import { markProjectAllocating, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
+import { getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 
 const withProjectRuntimeLock = async<T>(
     projectId : string,
@@ -39,10 +40,10 @@ type ControlPlaneResponse = {
     inProgress : boolean,
 };
 
-const getProjectSnapshot = async (
+const buildProjectSnapshot = async (
     projectId : string) : Promise< { project : Project | null; runtime : RuntimeAssignment | null}> => {
 
-    const snapshot = await getProjectSnapshot(projectId);
+    const snapshot = await getProjectRuntimeSnapshot(projectId);
     if(!snapshot.project){
         return {
             project : null,
@@ -62,7 +63,7 @@ const getProjectSnapshot = async (
         runtime : {
             userId : snapshot.runtime.userId,
             instanceId: snapshot.runtime.instanceId,
-            publicIP: snapshot.runtime.publicIP,
+            publicIP: snapshot.runtime.publicIp,
             projectId: snapshot.runtime.projectId,
             projectName: snapshot.runtime.projectName,
             projectType: snapshot.runtime.projectType,
@@ -139,7 +140,7 @@ export const createOrResumeProject = async ({
             });
 
             if(project.status === "DELETING"){
-                const snapshot = await getProjectSnapshot(project.id);
+                const snapshot = await buildProjectSnapshot(project.id);
 
                 return {
                     httpStatus : 202,
@@ -151,7 +152,7 @@ export const createOrResumeProject = async ({
             }
 
             if(project.status === "READY"){
-                const snapshot = await getProjectSnapshot(project.id);
+                const snapshot = await buildProjectSnapshot(project.id);
 
                 return {
                     httpStatus : createdByThisRequest ? 201 : 200,
@@ -168,7 +169,7 @@ export const createOrResumeProject = async ({
                 project.status === "BOOTING_CONTAINER" ||
                 project.status === "ALLOCATING_VM"
             ) {
-                const snapshot = await getProjectSnapshot(project.id);
+                const snapshot = await buildProjectSnapshot(project.id);
 
                 return {
                 httpStatus: 202,
@@ -189,7 +190,7 @@ export const createOrResumeProject = async ({
             );
 
             if(!runtimeResult.lockAcquired){
-                const snapshot = await getProjectSnapshot(project.id);
+                const snapshot = await buildProjectSnapshot(project.id);
 
                 return {
                     httpStatus : 202,
@@ -201,7 +202,7 @@ export const createOrResumeProject = async ({
             };
 
             const runtime = runtimeResult.value;
-            const snapshot = await getProjectSnapshot(project.id);
+            const snapshot = await buildProjectSnapshot(project.id);
 
             if(!runtime){
                 return {
@@ -277,7 +278,7 @@ export const deleteOrResumeProject = async({
             }
 
             if(ownedProject.status === "DELETING"){
-                const snapshot = await getProjectSnapshot(projectId);
+                const snapshot = await buildProjectSnapshot(projectId);
                 return {
                     httpStatus: 202,
                     message: "Project deletion is already in progress",
@@ -296,7 +297,7 @@ export const deleteOrResumeProject = async({
                 );
 
                 if(!cleanupResult.lockAcquired){
-                    const snapshot = await getProjectSnapshot(projectId);
+                    const snapshot = await buildProjectSnapshot(projectId);
 
                     return {
                         httpStatus: 202,
@@ -314,7 +315,7 @@ export const deleteOrResumeProject = async({
                 });
 
                 const finalized = await finalizeProjectDeletion(projectId,ownerId);
-                const snapshot = await getProjectSnapshot(projectId);
+                const snapshot = await buildProjectSnapshot(projectId);
 
                 if(!finalized){
                     return {
@@ -331,14 +332,14 @@ export const deleteOrResumeProject = async({
                     message : `Project ${projectId} deleted successfully`,
                     project : snapshot.project,
                     runtime : null,
-                    inProgress : true,
+                    inProgress : false,
                 }
             } catch (err ){
                 await markProjectDeletePendingReason(projectId, 
                     err instanceof Error ? err.message : "Unknown delete error",
                 );
 
-                const snapshot = await getProjectSnapshot(projectId);
+                const snapshot = await buildProjectSnapshot(projectId);
 
                 return {
                     httpStatus: 202,
@@ -352,7 +353,7 @@ export const deleteOrResumeProject = async({
     )
 
     if(!lockedResult){
-        const snapshot = await getProjectSnapshot(projectId);
+        const snapshot = await buildProjectSnapshot(projectId);
 
         return {
             httpStatus: 202,

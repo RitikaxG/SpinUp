@@ -39,18 +39,18 @@ const isHealthyInService = (instance : InstanceInfo ) => {
   )
 }
 
-const isIdleCandidate = (instance : InstanceInfo) => {
+const isIdleCandidate = (instance: InstanceInfo) => {
   return (
     isHealthyInService(instance) &&
-    ( instance.status === "IDLE" || instance.status === "UNTRACKED" )
-  )
-}
+    !instance.dbAssignedProjectId &&
+    (instance.status === "IDLE" || instance.status === "UNTRACKED")
+  );
+};
 
 export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) : Promise<InstanceInfo[]> => {
     const state = groupState ?? (await getAutoScalingGroupState());
-
-    const busyInstanceIds = await listBusyInstanceIds();
-    const busySet = busyInstanceIds;
+    
+    const busySet = await listBusyInstanceIds();
 
     const instanceDetails = await Promise.all(
         state.instances.map(async (instance): Promise<InstanceInfo> => {

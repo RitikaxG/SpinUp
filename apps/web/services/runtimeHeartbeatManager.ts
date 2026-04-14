@@ -176,7 +176,9 @@ export const recoverProjectRuntime = async(
                 containerName: instance.containerName,
                 fromStatus: project.status,
                 toStatus: project.status,
-            })
+            });
+
+            await cleanupProjectRuntimeAssignment(instance.projectId, project.ownerId);
 
             await markProjectFailed(instance.projectId, reason, {
                 assignedInstanceId : null,
@@ -185,8 +187,6 @@ export const recoverProjectRuntime = async(
                 lastHeartbeatAt : null,
             },
             "HEARTBEAT_FAILED");
-
-            await cleanupProjectRuntimeAssignment(instance.projectId, project.ownerId);
 
             await appendProjectEvent({
                 projectId: project.id,
