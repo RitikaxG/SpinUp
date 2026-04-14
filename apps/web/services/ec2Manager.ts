@@ -100,7 +100,6 @@ export const allocateVmAndScaleUp = async () => {
         meta: {},
     });
 
-    console.log(`No idle machines found. Ensuring idle capacity..`);
     const scalingDecision = await ensureIdleCapacityForAllocation();
     console.log(`Allocation scaling decision: ${scalingDecision.action} - ${scalingDecision.reason}`);
 
@@ -112,7 +111,6 @@ export const allocateVmAndScaleUp = async () => {
         idleMachines = await getIdleMachines();
 
         if(idleMachines.length > 0){
-            console.log(`Successfully scaled up and found an idle machine`);
             logInfo({
                 instanceId: idleMachines[0]?.InstanceId ?? null,
                 operation: "runtime.vm.allocated",
@@ -126,7 +124,7 @@ export const allocateVmAndScaleUp = async () => {
         // Sleep before next check
         await new Promise(res => setTimeout(res, POLL_INTERVAL));
     }
-    console.error(`No idle machines within instance wait timeout seems like max instance limit reached`);
+    
     logError({
         operation: "runtime.vm.allocation_failed",
         status: "FAILED",
@@ -259,15 +257,18 @@ export const ensureProjectRuntime = async (
        // 4) Fetch public IP
         const publicIP   = await getPublicIP(instanceId);
         if(!publicIP){
-            console.error(`Failed to fetch public IP for instance ${instanceId}`);
 
             try{
                 await terminateAndScaleDown(instanceId,true); 
                 
             } catch(err){
-                if(err instanceof Error){
-                    console.error(`Rollback terminate failed for ${instanceId}: ${err.message}`);
-                }
+                logger.error({
+                    instanceId,
+                    operation: "runtime.rollback_terminate.failed",
+                    status: "FAILED",
+                    reason: err instanceof Error ? err.message : "Rollback terminate failed",
+                    meta: {},
+                });
             } finally {
                 await deleteInstanceLifecycle(instanceId);
             }
@@ -352,6 +353,17 @@ export const ensureProjectRuntime = async (
         }
         
         catch(err:unknown){
+            logger.error({
+                instanceId,
+                containerName,
+                operation: "runtime.container_boot.failed",
+                status: "FAILED",
+                reason: err instanceof Error ? err.message : "Unknown container boot error",
+                meta: {
+                    publicIP,
+                },
+            });
+
             if(err instanceof Error){
                 console.error(`Unable to start container inside instance ${instanceId} ${err.message}`);
             }
@@ -359,17 +371,15 @@ export const ensureProjectRuntime = async (
             try{
                 await terminateAndScaleDown(instanceId,true);
             } catch( terminateErr ){
-                if(terminateErr instanceof Error){
-                    console.error(
-                        `Rollback terminate failed for ${instanceId}: ${terminateErr.message}`,
-                    );
-                }
                 logger.error({
                     instanceId,
                     containerName,
-                    operation: "runtime.container_boot.failed",
+                    operation: "runtime.rollback_terminate.failed",
                     status: "FAILED",
-                    reason: err instanceof Error ? err.message : "Unknown container boot error",
+                    reason:
+                        terminateErr instanceof Error
+                            ? terminateErr.message
+                            : "Rollback terminate failed",
                     meta: {
                         publicIP,
                     },

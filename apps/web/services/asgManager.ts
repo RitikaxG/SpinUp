@@ -119,7 +119,6 @@ const terminateIdleInstance = async ( instanceId : string, reason : string ) : P
     return false;
   }
 
-  console.log(`Scaling in idle instance ${instanceId} . Reason : ${reason}`);
   logger.info({
     operation: "instance.termination.requested",
     status: "STARTED",
@@ -171,14 +170,23 @@ const reapTimedOutIdleInstances = async() : Promise<string[]> => {
 
     if(didTerminate){
       terminated.push(instanceId);
+
+      logInfo({
+        instanceId,
+        operation: "instance.idle_timeout_termination",
+        status: "SUCCESS",
+        reason: "idle timeout exceeded",
+        meta: {},
+      });
+    }else{
+      logWarn({
+        instanceId,
+        operation: "instance.idle_timeout_termination",
+        status: "SKIPPED",
+        reason: "Idle timeout exceeded but instance was not terminated",
+        meta: {},
+      });
     }
-    logInfo({
-      instanceId,
-      operation: "instance.idle_timeout_termination",
-      status: "SUCCESS",
-      reason: "idle timeout exceeded",
-      meta: {},
-    });
   }
 
   return terminated;
@@ -263,18 +271,21 @@ export const ensureIdleCapacityForAllocation = async(): Promise<ScalingPlan> => 
 
   const lockedPlan = await runScaleUpUnderLock();
   if(!lockedPlan){
+
+    logWarn({
+      operation: "capacity.scale_up.skipped",
+      status: "SKIPPED",
+      reason: "Scale up already in progress by another request",
+      meta: {},
+    });
+
     return {
       action : "KEEP",
       reason : "Scale up already in progress by another request"
     }
   }
 
-  logWarn({
-    operation: "capacity.scale_up.skipped",
-    status: "SKIPPED",
-    reason: "Scale up already in progress by another request",
-    meta: {},
-  });
+  
   return lockedPlan;
 
 }
@@ -423,7 +434,6 @@ export const terminatingUnhealthyInstances = async () => {
       }
 
       // 2) Terminate unhealthy EC2 instance
-      console.log(`Terminating unhealthy instance ${instanceId}`);
       await terminateAndScaleDown(instanceId, false);
 
       // 3) Remove stale Redis lifecycle
@@ -472,14 +482,24 @@ export const reconcileAutoScaling = async () => {
   if(plan.action === "RECYCLE_IDLE"){
     for(const instanceId of plan.instanceIds){
       
-      await terminateIdleInstance(instanceId,"pool over target");
-      logInfo({
-        instanceId,
-        operation: "instance.recycled_from_idle_overflow",
-        status: "SUCCESS",
-        reason: "pool over target",
-        meta: {},
-      });
+      const didTerminate = await terminateIdleInstance(instanceId,"pool over target");
+      if (didTerminate) {
+        logInfo({
+            instanceId,
+            operation: "instance.recycled_from_idle_overflow",
+            status: "SUCCESS",
+            reason: "pool over target",
+            meta: {},
+          });
+      } else {
+          logWarn({
+              instanceId,
+              operation: "instance.recycled_from_idle_overflow",
+              status: "SKIPPED",
+              reason: "Idle overflow candidate was not terminated",
+              meta: {},
+          });
+      }
     }
 
     

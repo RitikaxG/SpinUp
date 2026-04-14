@@ -173,7 +173,7 @@ export const recoverProjectRuntime = async(
         },
     });
 
-    const locked = await withDistributedLock(
+    const recoveryResult = await withDistributedLock(
         controlPlaneLockKeys.runtime(instance.projectId),
         PROJECT_RUNTIME_LOCK_TTL_MS,
         async () => {
@@ -243,7 +243,8 @@ export const recoverProjectRuntime = async(
             return true;
         }
     );
-    if(!locked){
+
+    if (recoveryResult === null) {
         logWarn({
             projectId: instance.projectId,
             userId: instance.userId,
@@ -256,9 +257,25 @@ export const recoverProjectRuntime = async(
                 publicIP: instance.publicIP,
             },
         });
+    return false;
+    }
+
+    if (recoveryResult === false) {
+        logWarn({
+            projectId: instance.projectId,
+            userId: instance.userId,
+            instanceId: instance.instanceId,
+            containerName: instance.containerName,
+            operation: "runtime.recovery.locked_or_skipped",
+            status: "SKIPPED",
+            reason: "Recovery skipped because runtime assignment or project was no longer active",
+            meta: {
+                publicIP: instance.publicIP,
+            },
+        });
         return false;
     }
-    return locked;
+    return recoveryResult;
 }
 
 export const handleHeartbeatFailure = async(
@@ -310,6 +327,20 @@ export const handleHeartbeatFailure = async(
         return "SOFT_RECORDED";
     };
 
+    logWarn({
+        projectId: instance.projectId,
+        userId: instance.userId,
+        instanceId: instance.instanceId,
+        containerName: instance.containerName,
+        operation: "heartbeat.threshold_reached",
+        status: "FAILED",
+        reason,
+        meta: {
+            threshold: HEARTBEAT_FAILURE_THRESHOLD,
+            failures,
+            publicIP: instance.publicIP,
+        },
+    });
     const recovered = await recoverProjectRuntime(instance,
         `Heartbeat failure threshold reached. ${reason}`
     );

@@ -155,7 +155,6 @@ export async function DELETE(req : NextRequest){
     const { searchParams } = new URL(req.url);
     const projectId = searchParams.get("id");
 
-    console.log(projectId);
 
     if(!projectId){
         logWarn({

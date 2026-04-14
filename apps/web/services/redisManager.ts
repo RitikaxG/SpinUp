@@ -480,12 +480,6 @@ const bestEffortTerminateInstance = async(
             },
         });
     } catch(err){
-        if(err instanceof Error){
-            console.error(`Terminate failed for ${instanceId} : ${err.message}`)
-        } else {
-            console.error(`Terminate failed for ${instanceId}`)
-        }
-
         logError({
             instanceId,
             operation: "instance.terminated",
@@ -580,6 +574,10 @@ export const finalizeProjectDeletion = async (
         }
     });
 
+    const deletedProject = await markProjectDeleted(projectId, {
+        cleanupCompletedAt: new Date(),
+    });
+
     logInfo({
         projectId,
         userId: ownerId,
@@ -589,9 +587,7 @@ export const finalizeProjectDeletion = async (
         meta: {},
     });
 
-    return markProjectDeleted(projectId, {
-        cleanupCompletedAt: new Date(),
-    })
+    return deletedProject;
 }
 
 export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : string) => {
@@ -635,10 +631,6 @@ export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : 
        await markProjectDeletePendingReason(projectId,
         err instanceof Error ? err.message : "Unknown delete cleanup error"
        );
-
-       if(err instanceof Error){
-        console.error(`Error removing instance ${err.message}`);
-       }
 
        logError({
             projectId,
@@ -818,20 +810,6 @@ export const cleanupProjectRuntimeAssignment = async (
 
   const result = await recycleInstanceIfHealthy(instanceMetaData);
 
-    logInfo({
-        projectId,
-        userId: ownerId,
-        instanceId,
-        containerName: instanceMetaData.containerName,
-        operation: "runtime.cleanup.completed",
-        status: "SUCCESS",
-        reason: result.message,
-        meta: {
-            disposition: result.disposition,
-            publicIP: instanceMetaData.publicIP,
-        },
-    });
-
   await clearProjectAssignmentSnapshot(projectId);
 
   await deleteInstanceMappings({
@@ -848,6 +826,20 @@ export const cleanupProjectRuntimeAssignment = async (
       vmState: "STOPPED",
     },
   });
+
+  logInfo({
+        projectId,
+        userId: ownerId,
+        instanceId,
+        containerName: instanceMetaData.containerName,
+        operation: "runtime.cleanup.completed",
+        status: "SUCCESS",
+        reason: result.message,
+        meta: {
+            disposition: result.disposition,
+            publicIP: instanceMetaData.publicIP,
+        },
+    });
 
   return `${instanceId} associated with ${projectId} successfully cleaned up. ${result.message}`;
 };

@@ -65,7 +65,7 @@ const emit = (level : LogLevel, ctx: StructuredLogContext) : StructuredLogEntry 
         return entry;
     }
 
-    console.log(serialized);
+    console.info(serialized);
     return entry;
 };
 

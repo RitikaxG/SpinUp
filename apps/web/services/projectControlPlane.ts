@@ -238,6 +238,14 @@ export const createOrResumeProject = async ({
             if(!runtimeResult.lockAcquired){
                 const snapshot = await buildProjectSnapshot(project.id);
 
+                logger.warn({
+                    projectId: project.id,
+                    operation: "project.runtime.lock_busy",
+                    status: "SKIPPED",
+                    reason: "Project runtime reconciliation already in progress",
+                    meta: {},
+                });
+
                 return {
                     httpStatus : 202,
                     message: "Project runtime reconciliation already in progress",
@@ -251,13 +259,6 @@ export const createOrResumeProject = async ({
             const snapshot = await buildProjectSnapshot(project.id);
 
             if(!runtime){
-                logger.warn({
-                    projectId: project.id,
-                    operation: "project.runtime.lock_busy",
-                    status: "SKIPPED",
-                    reason: "Project runtime reconciliation already in progress",
-                    meta: {},
-                });
 
                 return {
                     httpStatus : 202,
@@ -349,6 +350,16 @@ export const deleteOrResumeProject = async({
 
             if(ownedProject.status === "DELETING"){
                 const snapshot = await buildProjectSnapshot(projectId);
+
+                logger.warn({
+                    operation: "project.delete.already_in_progress",
+                    status: "SKIPPED",
+                    reason: "Project deletion is already in progress",
+                    meta: {
+                        currentStatus: ownedProject.status,
+                    },
+                });
+
                 return {
                     httpStatus: 202,
                     message: "Project deletion is already in progress",
@@ -437,6 +448,15 @@ export const deleteOrResumeProject = async({
     if(!lockedResult){
         const snapshot = await buildProjectSnapshot(projectId);
 
+        logWarn({
+            projectId,
+            userId: ownerId,
+            operation: "project.delete.lock_busy",
+            status: "SKIPPED",
+            reason: "Delete request already in progress",
+            meta: {},
+        });
+        
         return {
             httpStatus: 202,
             message: "Delete request already in progress",
