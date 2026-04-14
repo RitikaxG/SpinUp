@@ -4,6 +4,7 @@ import { CONTAINER_STATUS_TIMEOUT_MS, HEALTH_TIMEOUT_MS, HEARTBEAT_FAILURE_THRES
 import { markProjectFailed, touchProjectHeartbeat } from "./projectLifecycleManager";
 import { prisma } from "db/client";
 import { appendProjectEvent, getAssignedProjectByInstanceId, listActiveProjectAssignments } from "./projectRuntimeTruthSource";
+import { logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
 
 type HealthSeverity = "SOFT" | "HARD";
 
@@ -140,12 +141,38 @@ export const handleHeartbeatSuccess = async (instance : InstanceRecord) => {
     await updateInstanceHeartbeat(instance.instanceId);
     await resetHeartbeatFailure(instance.instanceId);
     await touchProjectHeartbeat(instance.projectId);
+
+    logInfo({
+        projectId: instance.projectId,
+        userId: instance.userId,
+        instanceId: instance.instanceId,
+        containerName: instance.containerName,
+        operation: "heartbeat.success",
+        status: "SUCCESS",
+        reason: null,
+        meta: {
+            publicIP: instance.publicIP,
+        },
+    });
 };
 
 export const recoverProjectRuntime = async(
     instance : InstanceRecord,
     reason : string,
 ) : Promise<boolean> => {
+    logWarn({
+        projectId: instance.projectId,
+        userId: instance.userId,
+        instanceId: instance.instanceId,
+        containerName: instance.containerName,
+        operation: "runtime.recovery.started",
+        status: "STARTED",
+        reason,
+        meta: {
+            publicIP: instance.publicIP,
+        },
+    });
+
     const locked = await withDistributedLock(
         controlPlaneLockKeys.runtime(instance.projectId),
         PROJECT_RUNTIME_LOCK_TTL_MS,
@@ -200,10 +227,35 @@ export const recoverProjectRuntime = async(
                 toStatus: "FAILED",
             });
 
+            logInfo({
+                projectId: instance.projectId,
+                userId: instance.userId,
+                instanceId: instance.instanceId,
+                containerName: instance.containerName,
+                operation: "runtime.recovery.completed",
+                status: "SUCCESS",
+                reason: `Recovered runtime after failure on instance ${instance.instanceId}`,
+                meta: {
+                    publicIP: instance.publicIP,
+                },
+            });
+
             return true;
         }
     );
     if(!locked){
+        logWarn({
+            projectId: instance.projectId,
+            userId: instance.userId,
+            instanceId: instance.instanceId,
+            containerName: instance.containerName,
+            operation: "runtime.recovery.locked_or_skipped",
+            status: "SKIPPED",
+            reason: "Recovery lock not acquired",
+            meta: {
+                publicIP: instance.publicIP,
+            },
+        });
         return false;
     }
     return locked;
@@ -214,7 +266,36 @@ export const handleHeartbeatFailure = async(
     reason : string,
     severity : HealthSeverity,
 ): Promise<"SOFT_RECORDED" | "RECOVERED" | "LOCKED_OR_SKIPPED"> => {
+
+    logWarn({
+        projectId: instance.projectId,
+        userId: instance.userId,
+        instanceId: instance.instanceId,
+        containerName: instance.containerName,
+        operation: "heartbeat.failure",
+        status: "FAILED",
+        reason,
+        meta: {
+            severity,
+            publicIP: instance.publicIP,
+        },
+    });
+
     if(severity === "HARD"){
+        logWarn({
+            projectId: instance.projectId,
+            userId: instance.userId,
+            instanceId: instance.instanceId,
+            containerName: instance.containerName,
+            operation: "heartbeat.threshold_reached",
+            status: "FAILED",
+            reason,
+            meta: {
+                threshold: HEARTBEAT_FAILURE_THRESHOLD,
+                publicIP: instance.publicIP,
+            },
+        });
+
         const recovered = await recoverProjectRuntime(instance,reason);
         return recovered ? "RECOVERED" : "LOCKED_OR_SKIPPED";
     }
@@ -279,10 +360,18 @@ export const runHeartbeatReconcile = async () : Promise<HeartbeatRunSummary> => 
             }
         } catch(err){
             summary.errors += 1;
-            console.error(
-                `[heartbeat] failed for instance ${instance.instanceId}`,
-                err instanceof Error ? err.message : err,
-            )
+            logError({
+                projectId: instance.projectId,
+                userId: instance.userId,
+                instanceId: instance.instanceId,
+                containerName: instance.containerName,
+                operation: "heartbeat.reconcile.error",
+                status: "FAILED",
+                reason: err instanceof Error ? err.message : "Unknown heartbeat reconcile error",
+                meta: {
+                    publicIP: instance.publicIP,
+                },
+            });
         }
     } 
 

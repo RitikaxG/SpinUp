@@ -6,6 +6,7 @@ import axios from "axios";
 import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
+import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -80,9 +81,25 @@ export const allocateVmAndScaleUp = async () => {
     let idleMachines = await getIdleMachines();
 
     if(idleMachines.length > 0){
+    logInfo({
+        instanceId: idleMachines[0]?.InstanceId ?? null,
+        operation: "capacity.idle_instance.found",
+        status: "SUCCESS",
+        reason: "Idle VM available immediately for allocation",
+        meta: {
+            idleCount: idleMachines.length,
+        },
+    });
         return { instanceId : idleMachines[0]?.InstanceId ?? null}
     }
    
+    logInfo({
+        operation: "runtime.vm.allocation_wait_started",
+        status: "STARTED",
+        reason: "No idle machines found. Waiting for capacity",
+        meta: {},
+    });
+
     console.log(`No idle machines found. Ensuring idle capacity..`);
     const scalingDecision = await ensureIdleCapacityForAllocation();
     console.log(`Allocation scaling decision: ${scalingDecision.action} - ${scalingDecision.reason}`);
@@ -96,6 +113,13 @@ export const allocateVmAndScaleUp = async () => {
 
         if(idleMachines.length > 0){
             console.log(`Successfully scaled up and found an idle machine`);
+            logInfo({
+                instanceId: idleMachines[0]?.InstanceId ?? null,
+                operation: "runtime.vm.allocated",
+                status: "SUCCESS",
+                reason: "Idle VM became available for project allocation",
+                meta: {},
+            });
             return { instanceId : idleMachines[0]?.InstanceId ?? null}
         }
         
@@ -103,6 +127,14 @@ export const allocateVmAndScaleUp = async () => {
         await new Promise(res => setTimeout(res, POLL_INTERVAL));
     }
     console.error(`No idle machines within instance wait timeout seems like max instance limit reached`);
+    logError({
+        operation: "runtime.vm.allocation_failed",
+        status: "FAILED",
+        reason: "No idle machines within allocation wait timeout",
+        meta: {
+            waitTimeoutMs: INSTANCE_WAIT_TIMEOUT,
+        },
+    });
     return { instanceId : null }
 }
 
@@ -112,6 +144,21 @@ export const ensureProjectRuntime = async (
     projectType : ProjectTypeValue, 
     ownerId : string
 ) : Promise<RuntimeAssignment | null> => {
+
+    const logger = createScopedLogger({
+        projectId,
+        userId: ownerId,
+        meta: {
+            projectName,
+            projectType,
+        },
+    });
+
+    logger.info({
+    operation: "runtime.ensure.started",
+    status: "STARTED",
+    reason: null,
+    });
 
     await updateProjectRoomVmState(projectId, ownerId, "BOOTING");
     
@@ -128,10 +175,36 @@ export const ensureProjectRuntime = async (
             dbProject.publicIp &&
             (dbProject.status === "BOOTING_CONTAINER" || dbProject.status === "READY")
         ){
+            logger.info({
+                projectId: dbProject.id,
+                instanceId: dbProject.assignedInstanceId,
+                containerName: dbProject.containerName ?? null,
+                operation: "runtime.rehydration.requested",
+                status: "INFO",
+                reason: "Project already has assigned runtime in DB",
+                meta: {
+                    currentStatus: dbProject.status,
+                    publicIP: dbProject.publicIp,
+                },
+            });
             await rehydrateProjectRuntimeRedis(projectId);
+
+            logger.info({
+                projectId: dbProject.id,
+                instanceId: dbProject.assignedInstanceId,
+                containerName: dbProject.containerName ?? null,
+                operation: "runtime.rehydration.completed",
+                status: "SUCCESS",
+                reason: "Redis runtime assignment restored from DB snapshot",
+                meta: {
+                    currentStatus: dbProject.status,
+                    publicIP: dbProject.publicIp,
+                },
+            });
 
             if(dbProject.status === "READY" && dbProject.containerName){
                 await updateProjectRoomVmState(projectId, ownerId, "RUNNING");
+
 
                 return toRunningAssignment(
                 ownerId,
@@ -175,6 +248,14 @@ export const ensureProjectRuntime = async (
 
         const instanceId = allocation.instanceId;
 
+        logger.info({
+            instanceId,
+            operation: "runtime.vm.allocated",
+            status: "SUCCESS",
+            reason: "VM allocated for project runtime",
+            meta: {},
+        });
+
        // 4) Fetch public IP
         const publicIP   = await getPublicIP(instanceId);
         if(!publicIP){
@@ -182,6 +263,7 @@ export const ensureProjectRuntime = async (
 
             try{
                 await terminateAndScaleDown(instanceId,true); 
+                
             } catch(err){
                 if(err instanceof Error){
                     console.error(`Rollback terminate failed for ${instanceId}: ${err.message}`);
@@ -201,8 +283,26 @@ export const ensureProjectRuntime = async (
                 lastHeartbeatAt: null,
                 },
             );
+
+            logger.error({
+                instanceId,
+                operation: "runtime.public_ip.fetch_failed",
+                status: "FAILED",
+                reason: `Failed to fetch public IP for instance ${instanceId}`,
+                meta: {},
+            });
             return null;
         }
+
+        logger.info({
+            instanceId,
+            operation: "runtime.public_ip.fetched",
+            status: "SUCCESS",
+            reason: null,
+            meta: {
+                publicIP,
+            },
+        });
         
         const bootStartedAt = new Date();
 
@@ -225,7 +325,20 @@ export const ensureProjectRuntime = async (
         // 6) Start deterministic container
         let containerName = buildContainerName(projectId);
 
+        
         try{
+
+            logger.info({
+                instanceId,
+                operation: "runtime.container_boot.requested",
+                status: "STARTED",
+                reason: null,
+                meta: {
+                    publicIP,
+                    containerName,
+                },
+            });
+
              const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
                 projectId, 
                 projectName, 
@@ -251,6 +364,16 @@ export const ensureProjectRuntime = async (
                         `Rollback terminate failed for ${instanceId}: ${terminateErr.message}`,
                     );
                 }
+                logger.error({
+                    instanceId,
+                    containerName,
+                    operation: "runtime.container_boot.failed",
+                    status: "FAILED",
+                    reason: err instanceof Error ? err.message : "Unknown container boot error",
+                    meta: {
+                        publicIP,
+                    },
+                });
             } finally {
                 await deleteInstanceLifecycle(instanceId);
             }
@@ -272,6 +395,17 @@ export const ensureProjectRuntime = async (
             publicIp: publicIP,
             containerName,
             bootCompletedAt: new Date(),
+        });
+
+        logger.info({
+            instanceId,
+            containerName,
+            operation: "runtime.container_boot.succeeded",
+            status: "SUCCESS",
+            reason: "Container became ready",
+            meta: {
+                publicIP,
+            },
         });
 
         await mirrorProjectAssignmentToRedis({
@@ -309,6 +443,8 @@ export const ensureProjectRuntime = async (
                 lastHeartbeatAt: null,
             }
         );
+
+        
         throw err;
     }
 }

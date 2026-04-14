@@ -5,6 +5,7 @@ import { InstanceStatus, getInstance, deleteInstanceLifecycle, withDistributedLo
 import { prisma } from "db/client";
 import { AUTOSCALING_CONFIG } from "../lib/autoscaling/config";
 import { getAssignedProjectByInstanceId, listBusyInstanceIds } from "./projectRuntimeTruthSource";
+import { createScopedLogger, logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
 
 interface InstanceInfo {
     InstanceId? : string;
@@ -92,18 +93,52 @@ export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) 
 }
 
 const terminateIdleInstance = async ( instanceId : string, reason : string ) : Promise<boolean> => {
+  const logger = createScopedLogger({
+    instanceId,
+  });
+
   const assignedProject = await getAssignedProjectByInstanceId(instanceId);
   if (assignedProject) {
+    logger.warn({
+      operation: "instance.termination.skipped",
+      status: "SKIPPED",
+      reason: "Instance still has assigned project in DB",
+      meta: {},
+    });
     return false;
   }
 
   const redisRecord = await getInstance(instanceId);
   if(redisRecord?.inUse === "true"){
+    logger.warn({
+      operation: "instance.termination.skipped",
+      status: "SKIPPED",
+      reason: "Redis lifecycle still marks instance as in use",
+      meta: {},
+    });
     return false;
   }
 
   console.log(`Scaling in idle instance ${instanceId} . Reason : ${reason}`);
+  logger.info({
+    operation: "instance.termination.requested",
+    status: "STARTED",
+    reason,
+    meta: {
+      shouldDecreaseCapacity: true,
+    },
+  });
   await terminateAndScaleDown(instanceId, true);
+
+  logger.info({
+    operation: "instance.terminated",
+    status: "SUCCESS",
+    reason,
+    meta: {
+      shouldDecreaseCapacity: true,
+    },
+  });
+
   await deleteInstanceLifecycle(instanceId);
   return true;
 }
@@ -137,6 +172,13 @@ const reapTimedOutIdleInstances = async() : Promise<string[]> => {
     if(didTerminate){
       terminated.push(instanceId);
     }
+    logInfo({
+      instanceId,
+      operation: "instance.idle_timeout_termination",
+      status: "SUCCESS",
+      reason: "idle timeout exceeded",
+      meta: {},
+    });
   }
 
   return terminated;
@@ -154,7 +196,30 @@ const runScaleUpUnderLock = async () : Promise<ScalingPlan | null> => {
         return freshPlan;
       }
 
-      await setDesiredCapacityIfChanged(freshPlan.targetDesiredCapacity);
+      const scaleResult = await setDesiredCapacityIfChanged(freshPlan.targetDesiredCapacity);
+
+      if (scaleResult.changed) {
+        logInfo({
+          operation: "capacity.scale_up.triggered",
+          status: "SUCCESS",
+          reason: freshPlan.reason,
+          meta: {
+            previousDesiredCapacity: scaleResult.previousDesiredCapacity,
+            desiredCapacity: scaleResult.desiredCapacity,
+            groupName: scaleResult.groupName,
+          },
+        });
+      } else {
+        logWarn({
+          operation: "capacity.scale_up.skipped",
+          status: "SKIPPED",
+          reason: "Desired capacity already at target",
+          meta: {
+            desiredCapacity: scaleResult.desiredCapacity,
+            groupName: scaleResult.groupName,
+          },
+        });
+      }
       return freshPlan;
     }
   )
@@ -166,6 +231,16 @@ export const ensureIdleCapacityForAllocation = async(): Promise<ScalingPlan> => 
   // Request-time fast path: if at least one idle instance exists,
   // allocation can proceed immediately.
   if(snapshot.idleCount >= 1 ){
+    logInfo({
+      operation: "capacity.idle_instance.found",
+      status: "SUCCESS",
+      reason: `Idle capacity already available (${snapshot.idleCount} idle instance(s))`,
+      meta: {
+        idleCount: snapshot.idleCount,
+        desiredCapacity: snapshot.desiredCapacity,
+      },
+    });
+
     return {
       action : "KEEP",
       reason : `Idle capacity already available (${snapshot.idleCount} idle instance(s))`,
@@ -174,7 +249,16 @@ export const ensureIdleCapacityForAllocation = async(): Promise<ScalingPlan> => 
 
   const plan = computeScalingPlan(snapshot);
   if (plan.action !== "SCALE_UP") {
-      return plan;
+    logWarn({
+      operation: "capacity.scale_up.skipped",
+      status: "SKIPPED",
+      reason: plan.reason,
+      meta: {
+        idleCount: snapshot.idleCount,
+        desiredCapacity: snapshot.desiredCapacity,
+      },
+    });
+    return plan;
   }
 
   const lockedPlan = await runScaleUpUnderLock();
@@ -185,6 +269,12 @@ export const ensureIdleCapacityForAllocation = async(): Promise<ScalingPlan> => 
     }
   }
 
+  logWarn({
+    operation: "capacity.scale_up.skipped",
+    status: "SKIPPED",
+    reason: "Scale up already in progress by another request",
+    meta: {},
+  });
   return lockedPlan;
 
 }
@@ -300,6 +390,15 @@ export const terminatingUnhealthyInstances = async () => {
     const assignedProject = await getAssignedProjectByInstanceId(instanceId);
 
     try {
+      logWarn({
+        projectId: assignedProject?.id ?? null,
+        userId: assignedProject?.ownerId ?? null,
+        instanceId,
+        operation: "instance.unhealthy_cleanup.started",
+        status: "STARTED",
+        reason: "ASG instance became unhealthy",
+        meta: {},
+      });
       // 1) Reflect failure in DB if this unhealthy instance was assigned
       if (assignedProject) {
         await prisma.projectRoom.updateMany({
@@ -329,8 +428,29 @@ export const terminatingUnhealthyInstances = async () => {
 
       // 3) Remove stale Redis lifecycle
       await deleteInstanceLifecycle(instanceId);
+
+      logInfo({
+        projectId: assignedProject?.id ?? null,
+        userId: assignedProject?.ownerId ?? null,
+        instanceId,
+        operation: "instance.unhealthy_cleanup.completed",
+        status: "SUCCESS",
+        reason: "Unhealthy instance terminated and lifecycle removed",
+        meta: {},
+      });
+
     } catch (err: unknown) {
       if (err instanceof Error) {
+        logError({
+          projectId: assignedProject?.id ?? null,
+          userId: assignedProject?.ownerId ?? null,
+          instanceId,
+          operation: "instance.unhealthy_cleanup.failed",
+          status: "FAILED",
+          reason: err instanceof Error ? err.message : "Unknown unhealthy cleanup error",
+          meta: {},
+        });
+
         console.error(
           `Failed unhealthy-instance cleanup for ${instanceId}: ${err.message}`
         );
@@ -351,8 +471,18 @@ export const reconcileAutoScaling = async () => {
 
   if(plan.action === "RECYCLE_IDLE"){
     for(const instanceId of plan.instanceIds){
+      
       await terminateIdleInstance(instanceId,"pool over target");
+      logInfo({
+        instanceId,
+        operation: "instance.recycled_from_idle_overflow",
+        status: "SUCCESS",
+        reason: "pool over target",
+        meta: {},
+      });
     }
+
+    
 
     return {
       action : plan.action,

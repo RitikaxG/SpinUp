@@ -1,6 +1,8 @@
 import { Prisma, prisma, ProjectEventType, ProjectLifecycleStatus } from "db/client";
+import { createScopedLogger } from "../lib/observability/structuredLogger";
 
 // Project Lifecycle Writer
+const lifecycleLogger = createScopedLogger();
 
 type LifecyclePatch = {
     statusReason? : string | null;
@@ -107,6 +109,22 @@ const patchProjectWithEvent = async (
             }
         });
 
+        lifecycleLogger.info({
+            projectId,
+            userId: current.ownerId,
+            instanceId: event.instanceId ?? updated.assignedInstanceId ?? null,
+            containerName: event.containerName ?? updated.containerName ?? null,
+            operation: "project.lifecycle.patch",
+            status: "INFO",
+            reason: event.message ?? null,
+            meta: {
+                fromStatus: current.status,
+                toStatus: updated.status,
+                eventType: event.eventType,
+                publicIP: event.publicIp ?? updated.publicIp ?? null,
+            },
+        });
+
         return updated;
     });
 };
@@ -173,6 +191,22 @@ const transitionProject = async (
                 metadata: event.metadata,
             },
         });
+
+        lifecycleLogger.info({
+            projectId,
+            userId: current.ownerId,
+            instanceId: event.instanceId ?? updated.assignedInstanceId ?? null,
+            containerName: event.containerName ?? updated.containerName ?? null,
+            operation: "project.lifecycle.transition",
+            status: nextStatus === "FAILED" ? "FAILED" : "SUCCESS",
+            reason: event.message ?? null,
+            meta: {
+                fromStatus: current.status,
+                toStatus: nextStatus,
+                eventType: event.eventType,
+                publicIP: event.publicIp ?? updated.publicIp ?? null,
+        },
+        })
 
         return updated;
     });
@@ -312,6 +346,23 @@ export const markProjectFailed = async(
         },
 
         });
+
+        lifecycleLogger.error({
+            projectId,
+            userId: current.ownerId,
+            instanceId: updated.assignedInstanceId ?? current.assignedInstanceId ?? null,
+            containerName: updated.containerName ?? current.containerName ?? null,
+            operation: "project.lifecycle.transition",
+            status: "FAILED",
+            reason,
+            meta: {
+                fromStatus: current.status,
+                toStatus: "FAILED",
+                eventType,
+                publicIP: updated.publicIp ?? current.publicIp ?? null,
+            },
+        });
+
         return updated;
     });
 }

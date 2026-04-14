@@ -5,6 +5,7 @@ import { withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, c
 import { markProjectAllocating, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
 import { getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
+import { createScopedLogger, logWarn } from "../lib/observability/structuredLogger";
 
 const withProjectRuntimeLock = async<T>(
     projectId : string,
@@ -82,7 +83,23 @@ export const createOrResumeProject = async ({
     type : ProjectType,
 }) : Promise<ControlPlaneResponse> => {
 
+    
+
     const normalizedName = normalizeProjectName(name);
+
+    const logger = createScopedLogger({
+        userId: ownerId,
+        meta: {
+            projectName: normalizedName,
+            projectType: type,
+        },
+    });
+
+    logger.info({
+    operation: "project.control_plane.create_or_resume",
+    status: "STARTED",
+    reason: null,
+    });
 
     const lockedResult = await withDistributedLock<ControlPlaneResponse>(
         controlPlaneLockKeys.createProject(ownerId,normalizedName),
@@ -100,6 +117,15 @@ export const createOrResumeProject = async ({
                 });
 
                 if(existing){
+                    logger.info({
+                        projectId: existing.id,
+                        operation: "project.existing.reused",
+                        status: "INFO",
+                        reason: "Existing non-deleted project found for owner and normalized name",
+                        meta: {
+                            currentStatus: existing.status,
+                        },
+                    });
                     return existing;
                 }
 
@@ -134,13 +160,33 @@ export const createOrResumeProject = async ({
                         toStatus : "CREATED",
                         message : "Project created",
                     }
-                })
+                });
+
+                logger.info({
+                    projectId: created.id,
+                    operation: "project.db.created",
+                    status: "SUCCESS",
+                    reason: "Project row and initial project event created",
+                    meta: {
+                        projectType: created.type,
+                    },
+                });
 
                 return created;
             });
 
             if(project.status === "DELETING"){
                 const snapshot = await buildProjectSnapshot(project.id);
+
+                logger.warn({
+                    projectId: project.id,
+                    operation: "project.delete.already_in_progress",
+                    status: "SKIPPED",
+                    reason: "Project is already in DELETING state",
+                    meta: {
+                        currentStatus: project.status,
+                    },
+                });
 
                 return {
                     httpStatus : 202,
@@ -205,6 +251,14 @@ export const createOrResumeProject = async ({
             const snapshot = await buildProjectSnapshot(project.id);
 
             if(!runtime){
+                logger.warn({
+                    projectId: project.id,
+                    operation: "project.runtime.lock_busy",
+                    status: "SKIPPED",
+                    reason: "Project runtime reconciliation already in progress",
+                    meta: {},
+                });
+
                 return {
                     httpStatus : 202,
                     message : "Project exists but runtime provisioning",
@@ -227,6 +281,17 @@ export const createOrResumeProject = async ({
     );
 
     if(!lockedResult){
+        logWarn({
+            userId: ownerId,
+            operation: "project.create.lock_busy",
+            status: "SKIPPED",
+            reason: "Another create request for this project is already in progress",
+            meta: {
+                projectName: normalizedName,
+                projectType: type,
+            },
+        });
+
         return {
             httpStatus : 409,
             message: "Another create request for this project is already in progress",
@@ -246,6 +311,11 @@ export const deleteOrResumeProject = async({
     projectId : string,
     ownerId : string
 }) : Promise<ControlPlaneResponse> => {
+    const logger = createScopedLogger({
+        projectId,
+        userId: ownerId,
+    });
+
     const lockedResult = await withDistributedLock<ControlPlaneResponse>(
         controlPlaneLockKeys.deleteProject(projectId),
         CONTROL_PLANE_LOCK_TTL_MS,
@@ -289,7 +359,12 @@ export const deleteOrResumeProject = async({
             }
 
             await markProjectDeleting(projectId);
-            
+            logger.info({
+                operation: "project.deletion.started",
+                status: "STARTED",
+                reason: "Project marked DELETING",
+                meta: {},
+            });
 
             try{
                 const cleanupResult = await withProjectRuntimeLock(projectId, () => 
@@ -298,6 +373,13 @@ export const deleteOrResumeProject = async({
 
                 if(!cleanupResult.lockAcquired){
                     const snapshot = await buildProjectSnapshot(projectId);
+
+                    logger.warn({
+                        operation: "project.delete.runtime_lock_busy",
+                        status: "SKIPPED",
+                        reason: "Project runtime cleanup already in progress",
+                        meta: {},
+                    });
 
                     return {
                         httpStatus: 202,

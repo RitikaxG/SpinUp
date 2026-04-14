@@ -3,11 +3,19 @@ import { prisma } from "db/client";
 import { currentUser } from "@clerk/nextjs/server";
 import { ProjectSchema } from "../../../lib/validators/project";
 import { createOrResumeProject, deleteOrResumeProject } from "../../../services/projectControlPlane";
+import { logInfo, logWarn } from "../../../lib/observability/structuredLogger";
 
 async function requireDBUser(){
     const clerk = await currentUser();
 
     if(!clerk){
+        logWarn({
+            operation: "project.auth.failed",
+            status: "FAILED",
+            reason: "No authenticated Clerk user found",
+            meta: {},
+        });
+
         return{
             error : NextResponse.json({
                 error : "Unauthorised"
@@ -24,6 +32,15 @@ async function requireDBUser(){
     })
 
     if(!dbUser){
+        logWarn({
+            operation: "project.auth.failed",
+            status: "FAILED",
+            reason: "Authenticated Clerk user not found in DB",
+            meta: {
+            clerkId: clerk.id,
+            },
+        });
+
         return{
             error: NextResponse.json({
                 error : "User not found"
@@ -32,6 +49,17 @@ async function requireDBUser(){
             })
         }
     }
+
+    logInfo({
+        userId: dbUser.id,
+        operation: "project.user.verified",
+        status: "SUCCESS",
+        reason: null,
+        meta: {
+            clerkId: clerk.id,
+            email: dbUser.email,
+        },
+    });
 
     return {
         clerkUser : clerk,
@@ -45,10 +73,30 @@ export async function POST(req : NextRequest){
         return auth.error;
     }
 
+    logInfo({
+        userId: auth.dbUser.id,
+        operation: "project.create.requested",
+        status: "STARTED",
+        reason: null,
+        meta: {
+            route: "/api/project",
+        },
+    });
+
     const body = await req.json();
     const parsed = ProjectSchema.safeParse(body);
 
     if(!parsed.success){
+        logWarn({
+            userId: auth.dbUser.id,
+            operation: "project.create.validation_failed",
+            status: "FAILED",
+            reason: "ProjectSchema validation failed",
+            meta: {
+                errors: parsed.error.flatten().fieldErrors,
+            },
+        });
+
         return NextResponse.json({
             message : "Invalid input",
             error : parsed.error.flatten().fieldErrors,
@@ -61,7 +109,21 @@ export async function POST(req : NextRequest){
         ownerId: auth.dbUser.id,
         name : parsed.data.name,
         type : parsed.data.type,
-    })
+    });
+
+    logInfo({
+        projectId: result.project?.id ?? null,
+        userId: auth.dbUser.id,
+        instanceId: result.runtime?.instanceId ?? null,
+        containerName: result.runtime?.containerName ?? null,
+        operation: "project.create.response",
+        status: result.inProgress ? "INFO" : "SUCCESS",
+        reason: result.message,
+        meta: {
+            httpStatus: result.httpStatus,
+            inProgress: result.inProgress,
+        },
+    });
 
     return NextResponse.json({
         message : result.message,
@@ -80,12 +142,30 @@ export async function DELETE(req : NextRequest){
         return auth.error;
     }
 
+    logInfo({
+        userId: auth.dbUser.id,
+        operation: "project.delete.requested",
+        status: "STARTED",
+        reason: null,
+        meta: {
+            route: "/api/project",
+        },
+    });
+
     const { searchParams } = new URL(req.url);
     const projectId = searchParams.get("id");
 
     console.log(projectId);
 
     if(!projectId){
+        logWarn({
+            userId: auth.dbUser.id,
+            operation: "project.delete.validation_failed",
+            status: "FAILED",
+            reason: "Project id not provided",
+            meta: {},
+        });
+
         return NextResponse.json({
             message : `ProjectId not provided`
         },{
@@ -96,6 +176,20 @@ export async function DELETE(req : NextRequest){
     const result = await deleteOrResumeProject({
         projectId,
         ownerId : auth.dbUser.id,
+    });
+
+    logInfo({
+        projectId: result.project?.id ?? projectId,
+        userId: auth.dbUser.id,
+        instanceId: result.runtime?.instanceId ?? null,
+        containerName: result.runtime?.containerName ?? null,
+        operation: "project.delete.response",
+        status: result.inProgress ? "INFO" : "SUCCESS",
+        reason: result.message,
+        meta: {
+            httpStatus: result.httpStatus,
+            inProgress: result.inProgress,
+        },
     });
 
     return NextResponse.json({

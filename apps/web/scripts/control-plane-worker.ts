@@ -1,23 +1,38 @@
 import "dotenv/config";
 import { runControlPlaneTick } from "../services/controlPlaneReconciler";
 import { CONTROL_PLANE_INTERVAL_MS } from "../lib/control-plane/config";
+import { logError, logInfo } from "../lib/observability/structuredLogger";
 
 const sleep = (ms : number) => new Promise((resolve) => setTimeout(resolve,ms));
 
 async function main(){
-    console.log("[control-plane-worker] starting");
+    logInfo({
+        operation: "control_plane.worker.started",
+        status: "STARTED",
+        reason: null,
+        meta: {},
+    });
 
     while(true){
         const startedAt = Date.now();
 
         try{
             const result = await runControlPlaneTick();
-            console.log("[control-plane-worker] tick result:", JSON.stringify(result));
+            logInfo({
+                operation: "control_plane.worker.tick_completed",
+                status: "SUCCESS",
+                reason: null,
+                meta: {
+                    result,
+                },
+            });
         } catch(err){
-            console.error(
-                "[control-plane-worker] tick failed:",
-                err instanceof Error ? err.message : err,
-            );
+            logError({
+                operation: "control_plane.worker.tick_failed",
+                status: "FAILED",
+                reason: err instanceof Error ? err.message : "Unknown control-plane tick error",
+                meta: {},
+            });
         }
 
         const elapsed = Date.now() - startedAt;
@@ -28,9 +43,11 @@ async function main(){
 }
 
 main().catch((err) => {
-  console.error(
-    "[control-plane-worker] fatal error:",
-    err instanceof Error ? err.message : err,
-  );
+  logError({
+        operation: "control_plane.worker.fatal",
+        status: "FAILED",
+        reason: err instanceof Error ? err.message : "Unknown fatal worker error",
+        meta: {},
+    });
   process.exit(1);
 });

@@ -6,6 +6,7 @@ import { prisma } from "db/client";
 import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
 import { clearProjectAssignmentSnapshot, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
+import { logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
 
 const REDIS_URL = process.env.REDIS_URL as string;
 
@@ -190,6 +191,20 @@ export const writeBootingInstance = async ({
         .sadd(redisKeys.activeAssignedInstances,instanceId)
         .exec();
 
+    logInfo({
+        projectId,
+        userId,
+        instanceId,
+        operation: "runtime.redis_assignment.written",
+        status: "SUCCESS",
+        reason: "Booting runtime assignment mirrored to Redis",
+        meta: {
+            publicIP,
+            projectType,
+            redisStatus: "BOOTING",
+        },
+    });
+
     return record;
 }
 
@@ -235,6 +250,21 @@ export const writeRunningInstance = async({
         .set(redisKeys.projectInstance(projectId),instanceId)
         .sadd(redisKeys.activeAssignedInstances,instanceId)
         .exec()
+
+    logInfo({
+        projectId,
+        userId,
+        instanceId,
+        containerName,
+        operation: "runtime.redis_assignment.written",
+        status: "SUCCESS",
+        reason: "Running runtime assignment mirrored to Redis",
+        meta: {
+            publicIP,
+            projectType,
+            redisStatus: "RUNNING",
+        },
+    });
 
     return record;
 }
@@ -342,6 +372,16 @@ export const writeIdleInstance = async (instanceId : string) => {
         .srem(redisKeys.activeAssignedInstances,instanceId)
         .exec()
 
+    logInfo({
+        instanceId,
+        operation: "instance.returned_idle",
+        status: "SUCCESS",
+        reason: "Healthy instance returned to idle pool",
+        meta: {
+            publicIP: existing.publicIP,
+        },
+    });
+
     return idleRecord;
 }
 
@@ -427,12 +467,35 @@ const bestEffortTerminateInstance = async(
 ) => {
     try{
         await terminateAndScaleDown(instanceId, shouldDecreaseCapacity);
+
+        logInfo({
+            instanceId,
+            operation: "instance.terminated",
+            status: "SUCCESS",
+            reason: shouldDecreaseCapacity
+                ? "Instance terminated and desired capacity decremented"
+                : "Instance terminated without decreasing desired capacity",
+            meta: {
+                shouldDecreaseCapacity,
+            },
+        });
     } catch(err){
         if(err instanceof Error){
             console.error(`Terminate failed for ${instanceId} : ${err.message}`)
         } else {
             console.error(`Terminate failed for ${instanceId}`)
         }
+
+        logError({
+            instanceId,
+            operation: "instance.terminated",
+            status: "FAILED",
+            reason: err instanceof Error ? err.message : "Terminate failed",
+            meta: {
+                shouldDecreaseCapacity,
+            },
+        });
+
     } finally {
         await deleteInstanceLifecycle(instanceId);
     }
@@ -490,6 +553,20 @@ export const finalizeProjectDeletion = async (
             projectId,
             "Deletion not finalised: DB still shows active runtime assignment",
         )
+
+        logWarn({
+            projectId,
+            userId: ownerId,
+            instanceId: project.assignedInstanceId,
+            containerName: project.containerName,
+            operation: "project.deletion.finalize_skipped",
+            status: "SKIPPED",
+            reason: "Deletion not finalised because runtime assignment still present or status not DELETING",
+            meta: {
+                currentStatus: project.status,
+                publicIP: project.publicIp,
+            },
+        });
         return null;
     }
 
@@ -501,6 +578,15 @@ export const finalizeProjectDeletion = async (
         data : {
             vmState : "STOPPED"
         }
+    });
+
+    logInfo({
+        projectId,
+        userId: ownerId,
+        operation: "project.deletion.finalized",
+        status: "SUCCESS",
+        reason: "Project marked DELETED",
+        meta: {},
     });
 
     return markProjectDeleted(projectId, {
@@ -553,6 +639,16 @@ export const cleanUpOwnedProjectInstance = async (projectId : string, ownerId : 
        if(err instanceof Error){
         console.error(`Error removing instance ${err.message}`);
        }
+
+       logError({
+            projectId,
+            userId: ownerId,
+            operation: "runtime.cleanup.failed",
+            status: "FAILED",
+            reason: err instanceof Error ? err.message : "Unknown delete cleanup error",
+            meta: {},
+        });
+
        throw err;
     }
 }
@@ -629,6 +725,16 @@ export const cleanupProjectRuntimeAssignment = async (
   projectId: string,
   ownerId: string,
 ) => {
+
+  logInfo({
+      projectId,
+      userId: ownerId,
+      operation: "runtime.cleanup.started",
+      status: "STARTED",
+      reason: null,
+      meta: {},
+  });
+
   const ownedProject = await prisma.project.findFirst({
     where: {
       id: projectId,
@@ -679,6 +785,15 @@ export const cleanupProjectRuntimeAssignment = async (
       },
     });
 
+    logInfo({
+        projectId,
+        userId: ownerId,
+        operation: "runtime.cleanup.completed",
+        status: "SUCCESS",
+        reason: "No active instance for project",
+        meta: {},
+    });
+
     return `No active instance for project ${projectId}`;
   }
 
@@ -702,6 +817,20 @@ export const cleanupProjectRuntimeAssignment = async (
   }
 
   const result = await recycleInstanceIfHealthy(instanceMetaData);
+
+    logInfo({
+        projectId,
+        userId: ownerId,
+        instanceId,
+        containerName: instanceMetaData.containerName,
+        operation: "runtime.cleanup.completed",
+        status: "SUCCESS",
+        reason: result.message,
+        meta: {
+            disposition: result.disposition,
+            publicIP: instanceMetaData.publicIP,
+        },
+    });
 
   await clearProjectAssignmentSnapshot(projectId);
 
