@@ -6,6 +6,9 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "check-types": "turbo run check-types",
+    "test":"turbo run test",
+    "test:web":"turbo run test --filter=web",
+    "test:coverage":"turbo run test:coverage --filter=web",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "upload:base": "bun scripts/upload-base-app-to-s3.ts",
     "control-plane:worker": "tsx apps/web/scripts/control-plane-worker.ts"
