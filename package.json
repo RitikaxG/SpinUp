@@ -11,7 +11,8 @@
     "test:coverage":"turbo run test:coverage --filter=web",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "upload:base": "bun scripts/upload-base-app-to-s3.ts",
-    "control-plane:worker": "tsx apps/web/scripts/control-plane-worker.ts"
+    "control-plane:worker": "tsx apps/web/scripts/control-plane-worker.ts",
+    "preflight:e2e": "tsx apps/web/scripts/preflight-e2e.ts"
   },
   "devDependencies": {
     "prettier": "^3.6.0",

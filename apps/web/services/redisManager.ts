@@ -7,8 +7,9 @@ import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting
 import { randomUUID } from "crypto";
 import { clearProjectAssignmentSnapshot, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
+import { ENV } from "../lib/config/env";
 
-const REDIS_URL = process.env.REDIS_URL as string;
+const REDIS_URL = ENV.REDIS_URL;
 
 if(!REDIS_URL){
     console.error("REDIS_URL required");
@@ -108,6 +109,90 @@ export const controlPlaneLockKeys = {
 } as const;
 
 export const CONTROL_PLANE_LOCK_TTL_MS = 30_000;
+
+export const controlPlaneRedisKeys = {
+  workerHeartbeat: "control-plane:worker:heartbeat",
+} as const;
+
+export type ControlPlaneWorkerHeartbeatStatus =
+  | "STARTED"
+  | "SUCCESS"
+  | "FAILED";
+
+export type ControlPlaneWorkerHeartbeatRecord = {
+  lastSeenAt: string;
+  updatedAt: string;
+  status: ControlPlaneWorkerHeartbeatStatus;
+  pid: string;
+  hostname: string;
+  lastResult: string;
+  lastError: string;
+};
+
+const toControlPlaneWorkerHeartbeatRecord = (
+  data: Record<string, string>,
+): ControlPlaneWorkerHeartbeatRecord => {
+  return {
+    lastSeenAt: data.lastSeenAt ?? "",
+    updatedAt: data.updatedAt ?? "",
+    status: (data.status as ControlPlaneWorkerHeartbeatStatus) ?? "FAILED",
+    pid: data.pid ?? "",
+    hostname: data.hostname ?? "",
+    lastResult: data.lastResult ?? "",
+    lastError: data.lastError ?? "",
+  };
+};
+
+const serializeHeartbeatResult = (value: unknown) => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "[unserializable-result]";
+  }
+};
+
+export const writeControlPlaneWorkerHeartbeat = async ({
+  status,
+  lastResult,
+  lastError,
+}: {
+  status: ControlPlaneWorkerHeartbeatStatus;
+  lastResult?: unknown;
+  lastError?: string | null;
+}) => {
+  const now = new Date().toISOString();
+
+  const record: ControlPlaneWorkerHeartbeatRecord = {
+    lastSeenAt: now,
+    updatedAt: now,
+    status,
+    pid: String(process.pid),
+    hostname: process.env.HOSTNAME ?? "unknown",
+    lastResult: serializeHeartbeatResult(lastResult),
+    lastError: lastError ?? "",
+  };
+
+  await redis.hset(controlPlaneRedisKeys.workerHeartbeat, record);
+  return record;
+};
+
+export const readControlPlaneWorkerHeartbeat = async (): Promise<ControlPlaneWorkerHeartbeatRecord | null> => {
+  const data = await redis.hgetall(controlPlaneRedisKeys.workerHeartbeat);
+
+  if (!data || Object.keys(data).length === 0) {
+    return null;
+  }
+
+  return toControlPlaneWorkerHeartbeatRecord(data);
+};
 
 const toInstanceRecord = (data: Record<string,string>): InstanceRecord => {
     return {
