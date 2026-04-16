@@ -26,7 +26,7 @@ export default function RootLayout({
   return (
     <ClerkProvider>
       <html lang="en">
-      <body className={`$[geist.className} overflow-hidden`}>
+      <body className={`${geist.className} overflow-hidden`}>
          <header className="flex justify-between items-center p-4 gap-4 h-16">
             <div className="font-bold italic text-3xl">bolt</div>
             <div className="flex gap-4">

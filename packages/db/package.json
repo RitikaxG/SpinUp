@@ -16,5 +16,8 @@
   },
   "exports": {
     "./client": "./index.ts"
+  },
+  "scripts": {
+    "db:generate": "prisma generate --schema=./prisma/schema.prisma"
   }
 }

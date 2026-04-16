@@ -45,14 +45,15 @@ export default function LandingPage(){
         type : projectType,
         name : projectName
       })
-
-      console.log(response.data.projectDetails);
-      const projectDetails = response.data.projectDetails;
+      const { project } = response.data;
+      if(!project){
+        return;
+      }
 
       addProject({
-        id : projectDetails.projectId,
-        name : projectDetails.projectName,
-        type : projectDetails.projectType
+        id : project.id,
+        name : project.name,
+        type : project.type
       })
       console.log(`Zustand Project State Variable Returns : ${JSON.stringify(projects,null,2)}`);
     }
@@ -97,7 +98,7 @@ export default function LandingPage(){
         <input className="border-1 border-gray-600 rounded-sm w-[600px] h-[100px] mt-4 px-4 text-start text-white placeholder-gray-400 bg-neutral-900 outline-none relative" placeholder="Type our idea and we'll bring it to life"/>
 
 
-        <InputSelect reference1={projectNameRef} reference2={projectTypeRef} option1="nextjs" option2="react" option3="react-native" onClick={createProject}/>
+        <InputSelect reference1={projectNameRef} reference2={projectTypeRef} option1="NEXTJS" option2="REACT" option3="REACT_NATIVE" onClick={createProject}/>
 
         <div>{projects.map((project,i) => {
           return <div key={i} className="flex gap-5">
