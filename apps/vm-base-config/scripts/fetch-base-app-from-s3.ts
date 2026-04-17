@@ -4,21 +4,21 @@ import { Readable } from "stream";
 import path from "path";
 import { promises as fs } from 'fs';
 
-// const ACCESS_KEY_ID=process.env.AWS_S3_USER_ACCESS_KEY as string;
-// const ACCESS_KEY_SECRET=process.env.AWS_S3_USER_SECRET_ACCESS as string;
+const ACCESS_KEY_ID=process.env.AWS_S3_USER_ACCESS_KEY as string;
+const ACCESS_KEY_SECRET=process.env.AWS_S3_USER_SECRET_ACCESS as string;
 const S3_BUCKET_NAME="bolt-app-v1";
 
-// if (!ACCESS_KEY_ID || !ACCESS_KEY_SECRET || !S3_BUCKET_NAME) {
-//   throw new Error("AWS credentials are missing. Check your .env file.");
-// }
+if (!ACCESS_KEY_ID || !ACCESS_KEY_SECRET || !S3_BUCKET_NAME) {
+  throw new Error("AWS credentials are missing. Check your .env file.");
+}
 
 // Initialising an S3 Client
 const s3Client = new S3Client({
     region : "ap-south-1",
-    // credentials : {
-    //     accessKeyId : ACCESS_KEY_ID!,
-    //     secretAccessKey : ACCESS_KEY_SECRET!
-    // }
+    credentials : {
+        accessKeyId : ACCESS_KEY_ID!,
+        secretAccessKey : ACCESS_KEY_SECRET!
+    }
 })
 
 // ListFiles inside an object in S3
