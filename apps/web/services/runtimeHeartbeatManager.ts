@@ -341,6 +341,7 @@ export const handleHeartbeatFailure = async(
             publicIP: instance.publicIP,
         },
     });
+    
     const recovered = await recoverProjectRuntime(instance,
         `Heartbeat failure threshold reached. ${reason}`
     );
