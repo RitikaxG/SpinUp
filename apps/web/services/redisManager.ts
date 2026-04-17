@@ -592,7 +592,7 @@ export const cleanupProjectArtifacts = async ({
     const objectKey = `projects/${projectName}_${projectId}/code-${projectType}`;
 
     // S3 delete is idempotent: deleting a missing object still succeeds.
-    await deleteS3Object("bolt-app-v2",objectKey);
+    await deleteS3Object("bolt-app-v1",objectKey);
 
     return `Deleted S3 object if present ${objectKey}`;
 

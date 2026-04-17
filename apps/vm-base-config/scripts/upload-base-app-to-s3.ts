@@ -3,7 +3,7 @@ import fs from "fs";
 import mime from "mime-types"; // Use mime to get the content type
 import { S3Client, PutObjectCommand, HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 
-const S3_BUCKET_NAME = "bolt-app-v2";
+const S3_BUCKET_NAME = "bolt-app-v1";
 
 // Returns all files present in a dir
 function getAllFilePaths(dir: string){
