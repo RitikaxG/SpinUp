@@ -1,13 +1,12 @@
-import { terminateAndReplace, terminateAndScaleDown } from "../lib/aws/asgCommands";
-import { getPublicIP } from "../lib/aws/ec2Commands";
+import { terminateAndReplace } from "../lib/aws/asgCommands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
 import { deleteInstanceLifecycle, cleanupProjectRuntimeAssignment, rehydrateProjectRuntimeRedis, mirrorProjectAssignmentToRedis } from "./redisManager";
-import axios from "axios";
 import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
-import { waitForVmAgentHealthy } from "../lib/vmAgent/client";
+import { startVmContainer, waitForVmAgentHealthy } from "../lib/vmAgent/client";
+import { waitForPublicIP } from "../lib/aws/ec2Commands";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -271,7 +270,7 @@ export const ensureProjectRuntime = async (
         });
 
        // 4) Fetch public IP
-        const publicIP   = await getPublicIP(instanceId);
+        const publicIP   = await waitForPublicIP(instanceId);
         if(!publicIP){
 
            await cleanupFailedInstance({
@@ -401,16 +400,15 @@ export const ensureProjectRuntime = async (
                 },
             });
 
-             const startContainer = await axios.post(`http://${publicIP}:3000/start`,{
-                projectId, 
-                projectName, 
-                projectType ,
-                containerName
-            },{
-                timeout : 15_000,
-            });
+             const startContainer = await startVmContainer({
+                publicIP,
+                projectId,
+                projectName,
+                projectType,
+                containerName,
+             });
 
-            containerName = startContainer.data.containerName ?? containerName;
+            containerName = startContainer.containerName ?? containerName;
         }
         
         catch(err:unknown){
