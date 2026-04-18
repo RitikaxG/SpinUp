@@ -13,7 +13,7 @@ export const ENV = {
   AWS_REGION: getOptionalEnv("AWS_REGION", "ap-south-1"),
   EC2_LAUNCHER_ACCESS_KEY: getOptionalEnv("EC2_LAUNCHER_ACCESS_KEY"),
   EC2_LAUNCHER_ACCESS_SECRET: getOptionalEnv("EC2_LAUNCHER_ACCESS_SECRET"),
-  ASG_NAME: getOptionalEnv("ASG_NAME", "mycodeserver-asg"),
+  ASG_NAME: getOptionalEnv("ASG_NAME", "codeserver-autoscaling-group"),
   PREFLIGHT_VM_AGENT_BASE_URL: getOptionalEnv("PREFLIGHT_VM_AGENT_BASE_URL"),
 } as const;
 
