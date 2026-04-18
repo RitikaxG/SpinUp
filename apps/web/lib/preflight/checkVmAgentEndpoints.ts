@@ -3,6 +3,7 @@ import { getAutoScalingGroupState } from "../aws/asgCommands";
 import { getPublicIP } from "../aws/ec2Commands";
 import { ENV, assertEnvPresent } from "../config/env";
 import type { PreflightCheckResult } from "./types";
+import { buildVmAgentBaseUrl } from "../vmAgent/client";
 
 type EndpointProbeResult = {
   route: string;
@@ -12,12 +13,10 @@ type EndpointProbeResult = {
   note: string;
 };
 
-const trimTrailingSlash = (value: string) => value.replace(/\/+$/, "");
-
 const resolveVmAgentBaseUrl = async () => {
   if (ENV.PREFLIGHT_VM_AGENT_BASE_URL) {
     return {
-      baseUrl: trimTrailingSlash(ENV.PREFLIGHT_VM_AGENT_BASE_URL),
+      baseUrl: ENV.PREFLIGHT_VM_AGENT_BASE_URL.replace(/\/+$/, ""),
       source: "PREFLIGHT_VM_AGENT_BASE_URL",
     };
   }
@@ -51,7 +50,7 @@ const resolveVmAgentBaseUrl = async () => {
   }
 
   return {
-    baseUrl: `http://${publicIP}:3000`,
+    baseUrl: buildVmAgentBaseUrl(publicIP),
     source: `ASG instance ${candidate.InstanceId}`,
   };
 };

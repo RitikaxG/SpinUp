@@ -1,4 +1,4 @@
-import { terminateAndScaleDown } from "../lib/aws/asgCommands";
+import { terminateAndReplace, terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { getPublicIP } from "../lib/aws/ec2Commands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
 import { deleteInstanceLifecycle, cleanupProjectRuntimeAssignment, rehydrateProjectRuntimeRedis, mirrorProjectAssignmentToRedis } from "./redisManager";
@@ -7,6 +7,7 @@ import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
+import { waitForVmAgentHealthy } from "../lib/vmAgent/client";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -60,81 +61,96 @@ const updateProjectRoomVmState = async (
     })
 }
 
-// const isReusableRunningInstance = (
-//     ownerId : string,
-//     projectId : string,
-//     record : Awaited<ReturnType<typeof getInstance>>
-// ) => {
-//     return Boolean(
-//         record &&  
-//         record.userId === ownerId &&
-//         record.projectId === projectId &&
-//         record.publicIP &&
-//         record.containerName &&
-//         record.status === "RUNNING"
-//     );
-// }
-
+const cleanupFailedInstance = async ({
+  instanceId,
+  logger,
+  containerName,
+  publicIP,
+}: {
+  instanceId: string;
+  logger: ReturnType<typeof createScopedLogger>;
+  containerName?: string | null;
+  publicIP?: string | null;
+}) => {
+  try {
+    await terminateAndReplace(instanceId);
+  } catch (err) {
+    logger.error({
+      instanceId,
+      containerName: containerName ?? null,
+      operation: "runtime.rollback_terminate.failed",
+      status: "FAILED",
+      reason:
+        err instanceof Error ? err.message : "Rollback terminate failed",
+      meta: {
+        publicIP: publicIP ?? null,
+      },
+    });
+  } finally {
+    await deleteInstanceLifecycle(instanceId);
+  }
+};
 
 
 export const allocateVmAndScaleUp = async () => {
-    let idleMachines = await getIdleMachines();
+  let idleMachines = await getIdleMachines();
 
-    if(idleMachines.length > 0){
+  if (idleMachines.length > 0) {
     logInfo({
+      instanceId: idleMachines[0]?.InstanceId ?? null,
+      operation: "capacity.idle_instance.found",
+      status: "SUCCESS",
+      reason: "Idle VM available immediately for allocation",
+      meta: {
+        idleCount: idleMachines.length,
+      },
+    });
+    return { instanceId: idleMachines[0]?.InstanceId ?? null };
+  }
+
+  logInfo({
+    operation: "runtime.vm.allocation_wait_started",
+    status: "STARTED",
+    reason: "No idle machines found. Waiting for capacity",
+    meta: {},
+  });
+
+  const scalingDecision = await ensureIdleCapacityForAllocation();
+  console.log(
+    `Allocation scaling decision: ${scalingDecision.action} - ${scalingDecision.reason}`,
+  );
+
+  const start = Date.now();
+
+  while (Date.now() - start < INSTANCE_WAIT_TIMEOUT) {
+    idleMachines = await getIdleMachines();
+
+    if (idleMachines.length > 0) {
+      logInfo({
         instanceId: idleMachines[0]?.InstanceId ?? null,
-        operation: "capacity.idle_instance.found",
+        operation: "runtime.vm.allocated",
         status: "SUCCESS",
-        reason: "Idle VM available immediately for allocation",
-        meta: {
-            idleCount: idleMachines.length,
-        },
-    });
-        return { instanceId : idleMachines[0]?.InstanceId ?? null}
-    }
-   
-    logInfo({
-        operation: "runtime.vm.allocation_wait_started",
-        status: "STARTED",
-        reason: "No idle machines found. Waiting for capacity",
+        reason: "Idle VM became available for project allocation",
         meta: {},
-    });
-
-    const scalingDecision = await ensureIdleCapacityForAllocation();
-    console.log(`Allocation scaling decision: ${scalingDecision.action} - ${scalingDecision.reason}`);
-
-
-    // Wait for an idle machine to become available
-    const start = Date.now();
-
-    while(Date.now() - start < INSTANCE_WAIT_TIMEOUT){
-        idleMachines = await getIdleMachines();
-
-        if(idleMachines.length > 0){
-            logInfo({
-                instanceId: idleMachines[0]?.InstanceId ?? null,
-                operation: "runtime.vm.allocated",
-                status: "SUCCESS",
-                reason: "Idle VM became available for project allocation",
-                meta: {},
-            });
-            return { instanceId : idleMachines[0]?.InstanceId ?? null}
-        }
-        
-        // Sleep before next check
-        await new Promise(res => setTimeout(res, POLL_INTERVAL));
+      });
+      return { instanceId: idleMachines[0]?.InstanceId ?? null };
     }
-    
-    logError({
-        operation: "runtime.vm.allocation_failed",
-        status: "FAILED",
-        reason: "No idle machines within allocation wait timeout",
-        meta: {
-            waitTimeoutMs: INSTANCE_WAIT_TIMEOUT,
-        },
-    });
-    return { instanceId : null }
-}
+
+    await new Promise((res) => setTimeout(res, POLL_INTERVAL));
+  }
+
+  logError({
+    operation: "runtime.vm.allocation_failed",
+    status: "FAILED",
+    reason: "No idle machines within allocation wait timeout",
+    meta: {
+      waitTimeoutMs: INSTANCE_WAIT_TIMEOUT,
+    },
+  });
+
+  return { instanceId: null };
+};
+
 
 export const ensureProjectRuntime = async (
     projectId : string, 
@@ -258,20 +274,10 @@ export const ensureProjectRuntime = async (
         const publicIP   = await getPublicIP(instanceId);
         if(!publicIP){
 
-            try{
-                await terminateAndScaleDown(instanceId,true); 
-                
-            } catch(err){
-                logger.error({
-                    instanceId,
-                    operation: "runtime.rollback_terminate.failed",
-                    status: "FAILED",
-                    reason: err instanceof Error ? err.message : "Rollback terminate failed",
-                    meta: {},
-                });
-            } finally {
-                await deleteInstanceLifecycle(instanceId);
-            }
+           await cleanupFailedInstance({
+            instanceId,
+            logger,
+            });
 
             await updateProjectRoomVmState(projectId, ownerId, "FAILED");
             await markProjectFailed(
@@ -304,6 +310,61 @@ export const ensureProjectRuntime = async (
                 publicIP,
             },
         });
+
+        try {
+            logger.info({
+                instanceId,
+                operation: "runtime.vm_agent.wait_started",
+                status: "STARTED",
+                reason: null,
+                meta: {
+                    publicIP,
+                },
+            });
+
+            await waitForVmAgentHealthy(publicIP);
+
+            logger.info({
+                instanceId,
+                operation: "runtime.vm_agent.wait_succeeded",
+                status: "SUCCESS",
+                reason: "VM agent health endpoint became reachable",
+                meta: {
+                publicIP,
+                },
+            });
+            } catch (err) {
+            logger.error({
+                instanceId,
+                operation: "runtime.vm_agent.wait_failed",
+                status: "FAILED",
+                reason:
+                err instanceof Error ? err.message : "VM agent health wait failed",
+                meta: {
+                    publicIP,
+                },
+            });
+
+      await cleanupFailedInstance({
+        instanceId,
+        logger,
+        publicIP,
+      });
+
+      await updateProjectRoomVmState(projectId, ownerId, "FAILED");
+      await markProjectFailed(
+        projectId,
+        `VM agent did not become healthy on instance ${instanceId}`,
+        {
+          assignedInstanceId: null,
+          publicIp: null,
+          containerName: null,
+          lastHeartbeatAt: null,
+        },
+      );
+
+      return null;
+    }
         
         const bootStartedAt = new Date();
 
@@ -368,26 +429,13 @@ export const ensureProjectRuntime = async (
                 console.error(`Unable to start container inside instance ${instanceId} ${err.message}`);
             }
 
-            try{
-                await terminateAndScaleDown(instanceId,true);
-            } catch( terminateErr ){
-                logger.error({
-                    instanceId,
-                    containerName,
-                    operation: "runtime.rollback_terminate.failed",
-                    status: "FAILED",
-                    reason:
-                        terminateErr instanceof Error
-                            ? terminateErr.message
-                            : "Rollback terminate failed",
-                    meta: {
-                        publicIP,
-                    },
-                });
-            } finally {
-                await deleteInstanceLifecycle(instanceId);
-            }
-            
+            await cleanupFailedInstance({
+                instanceId,
+                logger,
+                containerName,
+                publicIP,
+            });
+
             await updateProjectRoomVmState(projectId,ownerId,"FAILED");
             await markProjectFailed(projectId,
                 `Unable to start container inside instance ${instanceId} ${err instanceof Error ? err.message : "Unknown error"}`

@@ -6,6 +6,8 @@ import { prisma } from "db/client";
 import { AUTOSCALING_CONFIG } from "../lib/autoscaling/config";
 import { getAssignedProjectByInstanceId, listBusyInstanceIds } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
+import { getPublicIP } from "../lib/aws/ec2Commands";
+import { probeVmAgentHealth } from "../lib/vmAgent/client";
 
 interface InstanceInfo {
     InstanceId? : string;
@@ -46,6 +48,46 @@ const isIdleCandidate = (instance: InstanceInfo) => {
     !instance.dbAssignedProjectId &&
     (instance.status === "IDLE" || instance.status === "UNTRACKED")
   );
+};
+
+const getReusableIdleInstances = async (instances: InstanceInfo[]) => {
+  const reusable = await Promise.all(
+    instances.map(async (instance) => {
+      if (!isIdleCandidate(instance) || !instance.InstanceId) {
+        return null;
+      }
+
+      const publicIP = await getPublicIP(instance.InstanceId);
+      if (!publicIP) {
+        logWarn({
+          instanceId: instance.InstanceId,
+          operation: "capacity.idle_instance.skipped",
+          status: "SKIPPED",
+          reason: "Idle candidate has no public IP",
+          meta: {},
+        });
+        return null;
+      }
+
+      const agentHealthy = await probeVmAgentHealth(publicIP);
+      if (!agentHealthy) {
+        logWarn({
+          instanceId: instance.InstanceId,
+          operation: "capacity.idle_instance.skipped",
+          status: "SKIPPED",
+          reason: "Idle candidate failed VM agent health check",
+          meta: {
+            publicIP,
+          },
+        });
+        return null;
+      }
+
+      return instance;
+    }),
+  );
+
+  return reusable.filter((instance): instance is InstanceInfo => Boolean(instance));
 };
 
 export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) : Promise<InstanceInfo[]> => {
@@ -92,7 +134,10 @@ export const getAllInstancesInfo = async ( groupState? : AutoScalingGroupState) 
     return instanceDetails;  
 }
 
-const terminateIdleInstance = async ( instanceId : string, reason : string ) : Promise<boolean> => {
+const terminateIdleInstance = async (
+  instanceId: string,
+  reason: string,
+): Promise<boolean> => {
   const logger = createScopedLogger({
     instanceId,
   });
@@ -109,7 +154,7 @@ const terminateIdleInstance = async ( instanceId : string, reason : string ) : P
   }
 
   const redisRecord = await getInstance(instanceId);
-  if(redisRecord?.inUse === "true"){
+  if (redisRecord?.inUse === "true") {
     logger.warn({
       operation: "instance.termination.skipped",
       status: "SKIPPED",
@@ -119,28 +164,33 @@ const terminateIdleInstance = async ( instanceId : string, reason : string ) : P
     return false;
   }
 
+  const state = await getAutoScalingGroupState();
+  const shouldDecreaseCapacity = state.desiredCapacity > state.minSize;
+
   logger.info({
     operation: "instance.termination.requested",
     status: "STARTED",
     reason,
     meta: {
-      shouldDecreaseCapacity: true,
+      shouldDecreaseCapacity,
     },
   });
-  await terminateAndScaleDown(instanceId, true);
+
+  await terminateAndScaleDown(instanceId, shouldDecreaseCapacity);
 
   logger.info({
     operation: "instance.terminated",
     status: "SUCCESS",
     reason,
     meta: {
-      shouldDecreaseCapacity: true,
+      shouldDecreaseCapacity,
     },
   });
 
   await deleteInstanceLifecycle(instanceId);
   return true;
-}
+};
+
 
 const reapTimedOutIdleInstances = async() : Promise<string[]> => {
   const timeoutMs = AUTOSCALING_CONFIG.IDLE_TIMEOUT_MINUTES * 60 * 1000;
@@ -303,34 +353,43 @@ export const getUnhealthyInstances = async () => {
 
 export const getIdleMachines = async () => {
     const instances = await getAllInstancesInfo();
-    return instances.filter(isIdleCandidate)
+    return getReusableIdleInstances(instances);
 }
 
-export const getScalingSnapshot = async() : Promise<ScalingSnapshot> => {
+export const getScalingSnapshot = async (): Promise<ScalingSnapshot> => {
   const groupState = await getAutoScalingGroupState();
   const instances = await getAllInstancesInfo(groupState);
 
   const healthyInServiceInstances = instances.filter(isHealthyInService);
-  const unhealthyInstances = instances.filter((instance) => instance.HealthStatus === "Unhealthy");
+  const unhealthyInstances = instances.filter(
+    (instance) => instance.HealthStatus === "Unhealthy",
+  );
 
-  const orderedIdleInstances = healthyInServiceInstances
-    .filter(isIdleCandidate)
-    .sort((a,b) => (a.lastHeartbeatAt ?? 0) - (b.lastHeartbeatAt ?? 0));
+  const reusableIdleInstances = await getReusableIdleInstances(
+    healthyInServiceInstances,
+  );
 
-  const busyInstances = healthyInServiceInstances.filter((instance) => !isIdleCandidate(instance));
+  const idleInstanceIds = new Set(
+    reusableIdleInstances
+      .map((instance) => instance.InstanceId)
+      .filter((instanceId): instanceId is string => Boolean(instanceId)),
+  );
+
+  const busyInstances = healthyInServiceInstances.filter((instance) => {
+    return !idleInstanceIds.has(instance.InstanceId ?? "");
+  });
 
   return {
-    totalInstances : groupState.totalInstances,
-    desiredCapacity : groupState.desiredCapacity,
-    healthyInServiceCount : healthyInServiceInstances.length,
-    unhealthyCount : unhealthyInstances.length,
-    idleCount : orderedIdleInstances.length,
+    totalInstances: groupState.totalInstances,
+    desiredCapacity: groupState.desiredCapacity,
+    healthyInServiceCount: healthyInServiceInstances.length,
+    unhealthyCount: unhealthyInstances.length,
+    idleCount: reusableIdleInstances.length,
     busyCount: busyInstances.length,
-    idleInstanceIds : orderedIdleInstances
-      .map((instance) => instance.InstanceId)
-      .filter((instanceId): instanceId is string => Boolean(instanceId))
-  }
+    idleInstanceIds: Array.from(idleInstanceIds),
+  };
 };
+
 
 export const computeScalingPlan = (
   snapshot : ScalingSnapshot

@@ -118,4 +118,8 @@ export const terminateAndScaleDown = async (instanceId : string, shouldDecreaseC
     return response;
 }
 
+export const terminateAndReplace = async (instanceId: string) => {
+  return terminateAndScaleDown(instanceId, false);
+};
+
 
