@@ -66,3 +66,58 @@ export const startVmContainer = async ({
 
   return response.data as { containerName?: string };
 };
+
+type ContainerStatusResponse = {
+  running?: boolean;
+  status?: string;
+  containerName?: string;
+};
+
+export const getVmContainerStatus = async ({
+  publicIP,
+  containerName,
+}: {
+  publicIP: string;
+  containerName: string;
+}): Promise<ContainerStatusResponse> => {
+  const response = await axios.post(
+    `${buildVmAgentBaseUrl(publicIP)}/containerStatus`,
+    { containerName },
+    {
+      timeout: ENV.VM_AGENT_REQUEST_TIMEOUT_MS,
+      validateStatus: () => true,
+    },
+  );
+
+  if (response.status >= 400) {
+    throw new Error(
+      `containerStatus failed for ${containerName} with status ${response.status}`,
+    );
+  }
+
+  return response.data as ContainerStatusResponse;
+};
+
+export const waitForVmContainerRunning = async ({
+  publicIP,
+  containerName,
+  timeoutMs = 20_000,
+}: {
+  publicIP: string;
+  containerName: string;
+  timeoutMs?: number;
+}) => {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await getVmContainerStatus({ publicIP, containerName });
+
+    if (result.running === true || result.status === "running") {
+      return;
+    }
+
+    await sleep(2_000);
+  }
+
+  throw new Error(`Container ${containerName} did not stay running on ${publicIP}`);
+};

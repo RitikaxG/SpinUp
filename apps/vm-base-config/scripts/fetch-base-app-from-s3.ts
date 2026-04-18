@@ -65,36 +65,45 @@ const getBodyAsString = async (response: GetObjectCommandOutput) => {
 };
 
 // Fetch and store files from S3
-export async function storeFilesInVM(sourcePrefix: string){
-    const basePath = path.resolve(process.cwd());
-    try{
-        const response = await listFilesInS3(sourcePrefix);
-        if(response.Contents){
-            await Promise.all(response.Contents.map(async (file) => {
-                const fileKey = file.Key;
-                if(fileKey && !fileKey.endsWith("/")){
-                    const data = await getFilesFromS3(fileKey);
-                    if(data.Body){
-                        const fileData = await getBodyAsString(data);
-                        
-                        const filePath = path.join(basePath,fileKey);
-                        
-                        // If filePath doesn't exist create it
-                        await fs.mkdir(path.dirname(filePath), { recursive: true });
+export async function storeFilesInVM(sourcePrefix: string) {
+  const basePath = path.resolve(process.cwd());
+  let writtenCount = 0;
 
-                        await fs.writeFile(filePath,fileData!);
-                        console.log(`File contents successfully written`);
-                        
-                    }
-                }
-            }))
-        }
-    }
-    catch(err){
-        console.error(`Error fetching files from S3`);
-    }
+  const response = await listFilesInS3(sourcePrefix);
+
+  if (!response.Contents || response.Contents.length === 0) {
+    throw new Error(`No files found in S3 for prefix: ${sourcePrefix}`);
+  }
+
+  await Promise.all(
+    response.Contents.map(async (file) => {
+      const fileKey = file.Key;
+      if (!fileKey || fileKey.endsWith("/")) {
+        return;
+      }
+
+      const data = await getFilesFromS3(fileKey);
+      if (!data.Body) {
+        throw new Error(`Missing body for S3 object: ${fileKey}`);
+      }
+
+      const fileData = await getBodyAsString(data);
+      const filePath = path.join(basePath, fileKey);
+
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, fileData ?? "");
+      writtenCount += 1;
+
+      console.log(`File written: ${filePath}`);
+    }),
+  );
+
+  return {
+    basePath,
+    writtenCount,
+    outputRoot: path.join(basePath, sourcePrefix),
+  };
 }
-
 
 async function copyObjectsInS3(objectKey: string, destinationKey : string){
     const command = new CopyObjectCommand({

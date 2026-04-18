@@ -5,7 +5,7 @@ import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
-import { startVmContainer, waitForVmAgentHealthy } from "../lib/vmAgent/client";
+import { startVmContainer, waitForVmAgentHealthy, waitForVmContainerRunning } from "../lib/vmAgent/client";
 import { waitForPublicIP } from "../lib/aws/ec2Commands";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
@@ -409,6 +409,11 @@ export const ensureProjectRuntime = async (
              });
 
             containerName = startContainer.containerName ?? containerName;
+
+            await waitForVmContainerRunning({
+                publicIP,
+                containerName,
+            });
         }
         
         catch(err:unknown){
