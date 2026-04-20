@@ -5,7 +5,7 @@ import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
-import { startVmContainer, waitForVmAgentHealthy, waitForVmContainerRunning, waitForWorkspaceReady } from "../lib/vmAgent/client";
+import { startVmContainer, waitForRuntimeReady, waitForVmAgentHealthy, waitForVmContainerRunning, waitForWorkspaceReady } from "../lib/vmAgent/client";
 import { waitForPublicIP } from "../lib/aws/ec2Commands";
 import { ENV } from "../lib/config/env";
 
@@ -452,15 +452,15 @@ export const ensureProjectRuntime = async (
             logger.info({
                 instanceId,
                 containerName,
-                operation: "runtime.container_running.wait_started",
+                operation: "runtime.ready.wait_started",
                 status: "STARTED",
-                reason: "Waiting for Docker container to report running",
+                reason: "Waiting for runtime readiness via container status or workspace HTTP",
                 meta: {
                     publicIP,
                 },
             });
 
-            await waitForVmContainerRunning({
+            const readiness = await waitForRuntimeReady({
                 publicIP,
                 containerName,
             });
@@ -468,35 +468,16 @@ export const ensureProjectRuntime = async (
             logger.info({
                 instanceId,
                 containerName,
-                operation: "runtime.container_running.wait_succeeded",
+                operation: "runtime.ready.wait_succeeded",
                 status: "SUCCESS",
-                reason: "Docker container reported running",
+                reason:
+                    readiness.source === "workspace_http"
+                    ? "Workspace HTTP endpoint became reachable"
+                    : "Container reported running",
                 meta: {
                     publicIP,
-                },
-            });
-
-            logger.info({
-                instanceId,
-                containerName,
-                operation: "runtime.workspace_ready.wait_started",
-                status: "STARTED",
-                reason: "Waiting for workspace HTTP endpoint to become reachable",
-                meta: {
-                    publicIP,
-                },
-            });
-
-            await waitForWorkspaceReady(publicIP);
-
-            logger.info({
-                instanceId,
-                containerName,
-                operation: "runtime.workspace_ready.wait_succeeded",
-                status: "SUCCESS",
-                reason: "Workspace HTTP endpoint became reachable",
-                meta: {
-                    publicIP,
+                    readinessSource: readiness.source,
+                    lastContainerStatus: readiness.lastContainerStatus,
                 },
             });
         }
@@ -507,7 +488,10 @@ export const ensureProjectRuntime = async (
                 containerName,
                 operation: "runtime.container_boot.failed",
                 status: "FAILED",
-                reason: err instanceof Error ? err.message : "Unknown container boot error",
+                reason:
+                    err instanceof Error
+                    ? err.message
+                    : "Runtime was not reported ready by container status or workspace HTTP",
                 meta: {
                     publicIP,
                 },

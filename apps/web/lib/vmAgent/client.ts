@@ -185,3 +185,54 @@ export const waitForWorkspaceReady = async (publicIP: string): Promise<void> => 
     `Workspace on ${publicIP}:${ENV.WORKSPACE_PORT} did not become ready within ${ENV.WORKSPACE_READY_TIMEOUT_MS}ms`,
   );
 };
+
+export const waitForRuntimeReady = async ({
+  publicIP,
+  containerName,
+}: {
+  publicIP: string;
+  containerName: string;
+}) => {
+  const deadline = Date.now() + ENV.WORKSPACE_READY_TIMEOUT_MS;
+  let lastContainerStatus: ContainerStatusResponse | null = null;
+
+  while (Date.now() < deadline) {
+    const [containerResult, workspaceReady] = await Promise.allSettled([
+      getVmContainerStatus({ publicIP, containerName }),
+      probeWorkspaceReady(publicIP),
+    ]);
+
+    if (
+      containerResult.status === "fulfilled" &&
+      isContainerRunning(containerResult.value)
+    ) {
+      return {
+        source: "container_status" as const,
+        lastContainerStatus: containerResult.value,
+      };
+    }
+
+    if (
+      workspaceReady.status === "fulfilled" &&
+      workspaceReady.value === true
+    ) {
+      return {
+        source: "workspace_http" as const,
+        lastContainerStatus:
+          containerResult.status === "fulfilled"
+            ? containerResult.value
+            : null,
+      };
+    }
+
+    if (containerResult.status === "fulfilled") {
+      lastContainerStatus = containerResult.value;
+    }
+
+    await sleep(ENV.WORKSPACE_READY_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(
+    `Runtime did not become ready on ${publicIP}. Last container status: ${JSON.stringify(lastContainerStatus)}`,
+  );
+};
