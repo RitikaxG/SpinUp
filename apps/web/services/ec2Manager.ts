@@ -61,8 +61,6 @@ const updateProjectRoomVmState = async (
     })
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const cleanupFailedInstance = async ({
   instanceId,
   logger,
@@ -75,24 +73,20 @@ const cleanupFailedInstance = async ({
   publicIP?: string | null;
 }) => {
     if (ENV.PRESERVE_FAILED_RUNTIME_FOR_DEBUG) {
-        logger.warn({
+    logger.warn({
         instanceId,
         containerName: containerName ?? null,
         operation: "runtime.cleanup.skipped_for_debug",
         status: "SKIPPED",
         reason: "Preserving failed runtime for manual inspection",
         meta: {
-            publicIP: publicIP ?? null,
-            graceMs: ENV.FAILED_RUNTIME_DEBUG_GRACE_MS,
+        publicIP: publicIP ?? null,
+        graceMs: ENV.FAILED_RUNTIME_DEBUG_GRACE_MS,
         },
-    });
+  });
 
-    if (ENV.FAILED_RUNTIME_DEBUG_GRACE_MS > 0) {
-      await sleep(ENV.FAILED_RUNTIME_DEBUG_GRACE_MS);
-    }
-
-    return;
-  }
+  return;
+}
   try {
     await terminateAndReplace(instanceId);
   } catch (err) {
@@ -329,12 +323,11 @@ export const ensureProjectRuntime = async (
             await markProjectFailed(
                 projectId,
                 `Failed to fetch public IP for instance ${instanceId}`,
-                {
-                assignedInstanceId: null,
-                publicIp: null,
-                containerName: null,
-                lastHeartbeatAt: null,
-                },
+                buildFailureStateReset({
+                    instanceId,
+                    publicIP: null,
+                    containerName: null,
+                }),
             );
 
             logger.error({
@@ -401,12 +394,11 @@ export const ensureProjectRuntime = async (
       await markProjectFailed(
         projectId,
         `VM agent did not become healthy on instance ${instanceId}`,
-        {
-          assignedInstanceId: null,
-          publicIp: null,
-          containerName: null,
-          lastHeartbeatAt: null,
-        },
+        buildFailureStateReset({
+            instanceId,
+            publicIP,
+            containerName: null,
+        }),
       );
 
       return null;
@@ -489,7 +481,7 @@ export const ensureProjectRuntime = async (
                     publicIP,
                 },
             });
-            
+
             await cleanupFailedInstance({
                 instanceId,
                 logger,
@@ -556,12 +548,11 @@ export const ensureProjectRuntime = async (
         await markProjectFailed(
             projectId,
             err instanceof Error ? err.message : "Unknown VM booting error",
-            {
-                assignedInstanceId: null,
-                publicIp: null,
+            buildFailureStateReset({
+                instanceId: null,
+                publicIP: null,
                 containerName: null,
-                lastHeartbeatAt: null,
-            }
+            }),
         );
 
         
