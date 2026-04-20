@@ -259,7 +259,19 @@ export const createOrResumeProject = async ({
             const snapshot = await buildProjectSnapshot(project.id);
 
             if(!runtime){
+                const latestSnapshot = await buildProjectSnapshot(project.id);
 
+                if (latestSnapshot.project?.status === "FAILED") {
+                    return {
+                    httpStatus: 500,
+                    message:
+                        latestSnapshot.project.lastEventMessage ??
+                        "Project runtime failed to start",
+                    project: latestSnapshot.project,
+                    runtime: latestSnapshot.runtime,
+                    inProgress: false,
+                    };
+                }
                 return {
                     httpStatus : 202,
                     message : "Project exists but runtime provisioning",

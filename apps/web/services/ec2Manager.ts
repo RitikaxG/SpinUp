@@ -7,6 +7,7 @@ import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRun
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
 import { startVmContainer, waitForVmAgentHealthy, waitForVmContainerRunning } from "../lib/vmAgent/client";
 import { waitForPublicIP } from "../lib/aws/ec2Commands";
+import { ENV } from "../lib/config/env";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -60,6 +61,8 @@ const updateProjectRoomVmState = async (
     })
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const cleanupFailedInstance = async ({
   instanceId,
   logger,
@@ -71,6 +74,25 @@ const cleanupFailedInstance = async ({
   containerName?: string | null;
   publicIP?: string | null;
 }) => {
+    if (ENV.PRESERVE_FAILED_RUNTIME_FOR_DEBUG) {
+        logger.warn({
+        instanceId,
+        containerName: containerName ?? null,
+        operation: "runtime.cleanup.skipped_for_debug",
+        status: "SKIPPED",
+        reason: "Preserving failed runtime for manual inspection",
+        meta: {
+            publicIP: publicIP ?? null,
+            graceMs: ENV.FAILED_RUNTIME_DEBUG_GRACE_MS,
+        },
+    });
+
+    if (ENV.FAILED_RUNTIME_DEBUG_GRACE_MS > 0) {
+      await sleep(ENV.FAILED_RUNTIME_DEBUG_GRACE_MS);
+    }
+
+    return;
+  }
   try {
     await terminateAndReplace(instanceId);
   } catch (err) {
@@ -150,6 +172,31 @@ export const allocateVmAndScaleUp = async () => {
   return { instanceId: null };
 };
 
+const buildFailureStateReset = ({
+  instanceId,
+  publicIP,
+  containerName,
+}: {
+  instanceId?: string | null;
+  publicIP?: string | null;
+  containerName?: string | null;
+}) => {
+  if (ENV.PRESERVE_FAILED_RUNTIME_FOR_DEBUG) {
+    return {
+      assignedInstanceId: instanceId ?? null,
+      publicIp: publicIP ?? null,
+      containerName: containerName ?? null,
+      lastHeartbeatAt: null,
+    };
+  }
+
+  return {
+    assignedInstanceId: null,
+    publicIp: null,
+    containerName: null,
+    lastHeartbeatAt: null,
+  };
+};
 
 export const ensureProjectRuntime = async (
     projectId : string, 
@@ -432,6 +479,17 @@ export const ensureProjectRuntime = async (
                 console.error(`Unable to start container inside instance ${instanceId} ${err.message}`);
             }
 
+            logger.error({
+                instanceId,
+                containerName,
+                operation: "runtime.debug.inspect_here",
+                status: "FAILED",
+                reason: "Container exited after start; inspect VM/container before cleanup",
+                meta: {
+                    publicIP,
+                },
+            });
+            
             await cleanupFailedInstance({
                 instanceId,
                 logger,
@@ -442,12 +500,13 @@ export const ensureProjectRuntime = async (
             await updateProjectRoomVmState(projectId,ownerId,"FAILED");
             await markProjectFailed(projectId,
                 `Unable to start container inside instance ${instanceId} ${err instanceof Error ? err.message : "Unknown error"}`
-            ,{
-                assignedInstanceId: null,
-                publicIp: null,
-                containerName: null,
-                lastHeartbeatAt: null,
-            })
+            ,
+             buildFailureStateReset({
+                instanceId,
+                publicIP,
+                containerName,
+            }),
+            )
             return null;
         }
         

@@ -18,6 +18,12 @@ const getOptionalNumberEnv = (name: string, fallback: number) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const getOptionalBooleanEnv = (name: string, fallback = false) => {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  return value === "true";
+};
+
 export const ENV = {
   REDIS_URL: getOptionalEnv("REDIS_URL"),
   AWS_REGION: getOptionalEnv("AWS_REGION", "ap-south-1"),
@@ -37,6 +43,15 @@ export const ENV = {
   VM_AGENT_REQUEST_TIMEOUT_MS: getOptionalNumberEnv(
     "VM_AGENT_REQUEST_TIMEOUT_MS",
     15_000,
+  ),
+
+  PRESERVE_FAILED_RUNTIME_FOR_DEBUG: getOptionalBooleanEnv(
+    "PRESERVE_FAILED_RUNTIME_FOR_DEBUG",
+    false,
+  ),
+  FAILED_RUNTIME_DEBUG_GRACE_MS: getOptionalNumberEnv(
+    "FAILED_RUNTIME_DEBUG_GRACE_MS",
+    0,
   ),
 } as const;
 
