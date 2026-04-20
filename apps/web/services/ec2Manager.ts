@@ -5,7 +5,7 @@ import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
-import { startVmContainer, waitForVmAgentHealthy, waitForVmContainerRunning } from "../lib/vmAgent/client";
+import { startVmContainer, waitForVmAgentHealthy, waitForVmContainerRunning, waitForWorkspaceReady } from "../lib/vmAgent/client";
 import { waitForPublicIP } from "../lib/aws/ec2Commands";
 import { ENV } from "../lib/config/env";
 
@@ -449,9 +449,55 @@ export const ensureProjectRuntime = async (
 
             containerName = startContainer.containerName ?? containerName;
 
+            logger.info({
+                instanceId,
+                containerName,
+                operation: "runtime.container_running.wait_started",
+                status: "STARTED",
+                reason: "Waiting for Docker container to report running",
+                meta: {
+                    publicIP,
+                },
+            });
+
             await waitForVmContainerRunning({
                 publicIP,
                 containerName,
+            });
+
+            logger.info({
+                instanceId,
+                containerName,
+                operation: "runtime.container_running.wait_succeeded",
+                status: "SUCCESS",
+                reason: "Docker container reported running",
+                meta: {
+                    publicIP,
+                },
+            });
+
+            logger.info({
+                instanceId,
+                containerName,
+                operation: "runtime.workspace_ready.wait_started",
+                status: "STARTED",
+                reason: "Waiting for workspace HTTP endpoint to become reachable",
+                meta: {
+                    publicIP,
+                },
+            });
+
+            await waitForWorkspaceReady(publicIP);
+
+            logger.info({
+                instanceId,
+                containerName,
+                operation: "runtime.workspace_ready.wait_succeeded",
+                status: "SUCCESS",
+                reason: "Workspace HTTP endpoint became reachable",
+                meta: {
+                    publicIP,
+                },
             });
         }
         

@@ -6,6 +6,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export const buildVmAgentBaseUrl = (publicIP: string) =>
   `http://${publicIP}:${ENV.VM_AGENT_PORT}`;
 
+export const buildWorkspaceBaseUrl = (publicIP: string) =>
+  `http://${publicIP}:${ENV.WORKSPACE_PORT}`;
+
 export const probeVmAgentHealth = async (publicIP: string): Promise<boolean> => {
   try {
     const response = await axios.get(`${buildVmAgentBaseUrl(publicIP)}/health`, {
@@ -69,8 +72,31 @@ export const startVmContainer = async ({
 
 type ContainerStatusResponse = {
   running?: boolean;
+  isRunning?: boolean;
+  exists?: boolean;
   status?: string;
+  state?: string;
+  containerStatus?: string;
   containerName?: string;
+};
+
+const normalizeStatus = (value: unknown) =>
+  typeof value === "string" ? value.trim().toLowerCase() : "";
+
+const isContainerRunning = (result: ContainerStatusResponse) => {
+  if (result.running === true || result.isRunning === true) {
+    return true;
+  }
+
+  const candidates = [
+    normalizeStatus(result.status),
+    normalizeStatus(result.state),
+    normalizeStatus(result.containerStatus),
+  ];
+
+  return candidates.some(
+    (value) => value === "running" || value.startsWith("up"),
+  );
 };
 
 export const getVmContainerStatus = async ({
@@ -101,23 +127,61 @@ export const getVmContainerStatus = async ({
 export const waitForVmContainerRunning = async ({
   publicIP,
   containerName,
-  timeoutMs = 20_000,
+  timeoutMs = ENV.VM_CONTAINER_RUNNING_TIMEOUT_MS,
 }: {
   publicIP: string;
   containerName: string;
   timeoutMs?: number;
 }) => {
   const deadline = Date.now() + timeoutMs;
+  let lastStatus: ContainerStatusResponse | null = null;
 
   while (Date.now() < deadline) {
     const result = await getVmContainerStatus({ publicIP, containerName });
+    lastStatus = result;
 
-    if (result.running === true || result.status === "running") {
-      return;
+    if (isContainerRunning(result)) {
+      return result;
     }
 
     await sleep(2_000);
   }
 
-  throw new Error(`Container ${containerName} did not stay running on ${publicIP}`);
+  throw new Error(
+    `Container ${containerName} was not reported as running within ${timeoutMs}ms. Last status: ${JSON.stringify(lastStatus)}`,
+  );
+};
+
+export const probeWorkspaceReady = async (publicIP: string): Promise<boolean> => {
+  try {
+    const response = await axios.get(buildWorkspaceBaseUrl(publicIP), {
+      timeout: 5_000,
+      validateStatus: () => true,
+      maxRedirects: 0,
+    });
+
+    return (
+      (response.status >= 200 && response.status < 400) ||
+      response.status === 401
+    );
+  } catch {
+    return false;
+  }
+};
+
+export const waitForWorkspaceReady = async (publicIP: string): Promise<void> => {
+  const deadline = Date.now() + ENV.WORKSPACE_READY_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    const ready = await probeWorkspaceReady(publicIP);
+    if (ready) {
+      return;
+    }
+
+    await sleep(ENV.WORKSPACE_READY_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(
+    `Workspace on ${publicIP}:${ENV.WORKSPACE_PORT} did not become ready within ${ENV.WORKSPACE_READY_TIMEOUT_MS}ms`,
+  );
 };

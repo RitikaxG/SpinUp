@@ -5,6 +5,13 @@ import { ProjectSchema } from "../../../lib/validators/project";
 import { createOrResumeProject, deleteOrResumeProject } from "../../../services/projectControlPlane";
 import { logInfo, logWarn } from "../../../lib/observability/structuredLogger";
 
+const getResponseLogStatus = (httpStatus: number, inProgress: boolean) => {
+  if (httpStatus >= 500) return "FAILED";
+  if (httpStatus >= 400) return "FAILED";
+  if (inProgress) return "INFO";
+  return "SUCCESS";
+};
+
 async function requireDBUser(){
     const clerk = await currentUser();
 
@@ -117,7 +124,7 @@ export async function POST(req : NextRequest){
         instanceId: result.runtime?.instanceId ?? null,
         containerName: result.runtime?.containerName ?? null,
         operation: "project.create.response",
-        status: result.inProgress ? "INFO" : "SUCCESS",
+        status: getResponseLogStatus(result.httpStatus, result.inProgress),
         reason: result.message,
         meta: {
             httpStatus: result.httpStatus,
@@ -183,7 +190,7 @@ export async function DELETE(req : NextRequest){
         instanceId: result.runtime?.instanceId ?? null,
         containerName: result.runtime?.containerName ?? null,
         operation: "project.delete.response",
-        status: result.inProgress ? "INFO" : "SUCCESS",
+        status: getResponseLogStatus(result.httpStatus, result.inProgress),
         reason: result.message,
         meta: {
             httpStatus: result.httpStatus,

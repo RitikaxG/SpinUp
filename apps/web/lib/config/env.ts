@@ -53,6 +53,19 @@ export const ENV = {
     "FAILED_RUNTIME_DEBUG_GRACE_MS",
     0,
   ),
+  VM_CONTAINER_RUNNING_TIMEOUT_MS: getOptionalNumberEnv(
+  "VM_CONTAINER_RUNNING_TIMEOUT_MS",
+  60_000,
+),
+WORKSPACE_PORT: getOptionalNumberEnv("WORKSPACE_PORT", 8080),
+WORKSPACE_READY_TIMEOUT_MS: getOptionalNumberEnv(
+  "WORKSPACE_READY_TIMEOUT_MS",
+  300_000,
+),
+WORKSPACE_READY_POLL_INTERVAL_MS: getOptionalNumberEnv(
+  "WORKSPACE_READY_POLL_INTERVAL_MS",
+  5_000,
+),
 } as const;
 
 export const assertEnvPresent = (names: Array<keyof typeof ENV>) => {
