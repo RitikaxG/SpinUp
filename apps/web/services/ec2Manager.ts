@@ -1,13 +1,14 @@
-import { terminateAndReplace } from "../lib/aws/asgCommands";
+import { terminateAndReplace, terminateAndScaleDown } from "../lib/aws/asgCommands";
 import { ensureIdleCapacityForAllocation, getIdleMachines } from "./asgManager"
 import { deleteInstanceLifecycle, cleanupProjectRuntimeAssignment, rehydrateProjectRuntimeRedis, mirrorProjectAssignmentToRedis } from "./redisManager";
 import { prisma } from "db/client";
 import { markProjectBooting, markProjectFailed, markProjectReady } from "./projectLifecycleManager";
 import { ACTIVE_RUNTIME_STATUSES, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logError, logInfo } from "../lib/observability/structuredLogger";
-import { startVmContainer, waitForRuntimeReady, waitForVmAgentHealthy, waitForVmContainerRunning, waitForWorkspaceReady } from "../lib/vmAgent/client";
+import { startVmContainer, waitForRuntimeReady, waitForVmAgentHealthy } from "../lib/vmAgent/client";
 import { waitForPublicIP } from "../lib/aws/ec2Commands";
 import { ENV } from "../lib/config/env";
+import axios from "axios";
 
 const INSTANCE_WAIT_TIMEOUT = 180_000;
 const POLL_INTERVAL = 5000;
@@ -60,6 +61,155 @@ const updateProjectRoomVmState = async (
         }
     })
 }
+
+const isDeletionTerminalOrInProgress = (status?: string | null) => {
+    return status === "DELETING" || status === "DELETED";
+};
+
+const getLatestProjectLifecycleState = async (projectId: string) => {
+    return prisma.project.findUnique({
+        where: { id: projectId },
+        select: {
+            id: true,
+            ownerId: true,
+            name: true,
+            type: true,
+            status: true,
+            assignedInstanceId: true,
+            publicIp: true,
+            containerName: true,
+        },
+    });
+};
+
+const stopContainerBestEffort = async ({
+    publicIP,
+    containerName,
+    logger,
+    instanceId,
+}: {
+    publicIP?: string | null;
+    containerName?: string | null;
+    logger: ReturnType<typeof createScopedLogger>;
+    instanceId?: string | null;
+}) => {
+    if (!publicIP || !containerName) return;
+
+    try {
+        await axios.post(
+            `http://${publicIP}:3000/stop`,
+            { containerName },
+            { timeout: 5000 },
+        );
+    } catch (err) {
+        logger.warn({
+            instanceId: instanceId ?? null,
+            containerName: containerName ?? null,
+            operation: "runtime.cancel.stop_container_failed",
+            status: "SKIPPED",
+            reason:
+                err instanceof Error
+                    ? err.message
+                    : "Failed to stop container during cancellation",
+            meta: {
+                publicIP,
+            },
+        });
+    }
+};
+
+const cancelProvisioningIfDeletionRequested = async ({
+    projectId,
+    ownerId,
+    projectName,
+    projectType,
+    instanceId,
+    publicIP,
+    containerName,
+    phase,
+    logger,
+}: {
+    projectId: string;
+    ownerId: string;
+    projectName: string;
+    projectType: ProjectTypeValue;
+    instanceId?: string | null;
+    publicIP?: string | null;
+    containerName?: string | null;
+    phase: string;
+    logger: ReturnType<typeof createScopedLogger>;
+}): Promise<boolean> => {
+    const latest = await getLatestProjectLifecycleState(projectId);
+
+    if (!latest || !isDeletionTerminalOrInProgress(latest.status)) {
+        return false;
+    }
+
+    logger.warn({
+        projectId,
+        userId: ownerId,
+        instanceId: latest.assignedInstanceId ?? instanceId ?? null,
+        containerName: latest.containerName ?? containerName ?? null,
+        operation: "runtime.provisioning.cancelled",
+        status: "SKIPPED",
+        reason: `Deletion requested during ${phase}`,
+        meta: {
+            phase,
+            currentStatus: latest.status,
+            publicIP: latest.publicIp ?? publicIP ?? null,
+            projectName,
+            projectType,
+        },
+    });
+
+    if (latest.assignedInstanceId) {
+        await cleanupProjectRuntimeAssignment(projectId, ownerId);
+        return true;
+    }
+
+    if (instanceId) {
+        await stopContainerBestEffort({
+            publicIP,
+            containerName,
+            logger,
+            instanceId,
+        });
+
+        try {
+            await terminateAndScaleDown(instanceId, false);
+        } catch (err) {
+            logger.error({
+                projectId,
+                userId: ownerId,
+                instanceId,
+                containerName: containerName ?? null,
+                operation: "runtime.cancel.terminate_failed",
+                status: "FAILED",
+                reason:
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to terminate instance during cancellation",
+                meta: {
+                    publicIP: publicIP ?? null,
+                },
+            });
+        } finally {
+            await deleteInstanceLifecycle(instanceId);
+        }
+    }
+
+    await prisma.projectRoom.updateMany({
+        where: {
+            projectId,
+            userId: ownerId,
+        },
+        data: {
+            vmState: "STOPPED",
+        },
+    });
+
+    return true;
+};
 
 const cleanupFailedInstance = async ({
   instanceId,
@@ -403,14 +553,63 @@ export const ensureProjectRuntime = async (
 
       return null;
     }
+
+        if (
+            await cancelProvisioningIfDeletionRequested({
+                projectId,
+                ownerId,
+                projectName,
+                projectType,
+                instanceId,
+                publicIP,
+                phase: "post_vm_agent_health",
+                logger,
+            })
+        ) {
+            return null;
+        }
         
         const bootStartedAt = new Date();
 
-        await markProjectBooting(projectId,{
-            instanceId,
-            publicIp: publicIP,
-            bootStartedAt,
-        })
+        if (
+            await cancelProvisioningIfDeletionRequested({
+                projectId,
+                ownerId,
+                projectName,
+                projectType,
+                instanceId,
+                publicIP,
+                phase: "before_mark_project_booting",
+                logger,
+            })
+        ) {
+            return null;
+        }
+
+        try {
+            await markProjectBooting(projectId, {
+                instanceId,
+                publicIp: publicIP,
+                bootStartedAt,
+            });
+        } catch (err) {
+            const cancelled = await cancelProvisioningIfDeletionRequested({
+                projectId,
+                ownerId,
+                projectName,
+                projectType,
+                instanceId,
+                publicIP,
+                phase: "mark_project_booting_transition",
+                logger,
+            });
+
+            if (cancelled) {
+                return null;
+            }
+
+            throw err;
+        }
 
         await mirrorProjectAssignmentToRedis({
             instanceId,
@@ -439,6 +638,21 @@ export const ensureProjectRuntime = async (
                 },
             });
 
+            if (
+                await cancelProvisioningIfDeletionRequested({
+                    projectId,
+                    ownerId,
+                    projectName,
+                    projectType,
+                    instanceId,
+                    publicIP,
+                    phase: "before_start_vm_container",
+                    logger,
+                })
+            ) {
+                return null;
+            }
+
              const startContainer = await startVmContainer({
                 publicIP,
                 projectId,
@@ -448,6 +662,22 @@ export const ensureProjectRuntime = async (
              });
 
             containerName = startContainer.containerName ?? containerName;
+
+            if (
+                await cancelProvisioningIfDeletionRequested({
+                    projectId,
+                    ownerId,
+                    projectName,
+                    projectType,
+                    instanceId,
+                    publicIP,
+                    containerName,
+                    phase: "after_start_vm_container",
+                    logger,
+                })
+            ) {
+                return null;
+            }
 
             logger.info({
                 instanceId,
@@ -531,13 +761,49 @@ export const ensureProjectRuntime = async (
             )
             return null;
         }
+
+        if (
+            await cancelProvisioningIfDeletionRequested({
+                projectId,
+                ownerId,
+                projectName,
+                projectType,
+                instanceId,
+                publicIP,
+                containerName,
+                phase: "before_mark_project_ready",
+                logger,
+            })
+        ) {
+            return null;
+        }
         
-        await markProjectReady(projectId,{
-            instanceId,
-            publicIp: publicIP,
-            containerName,
-            bootCompletedAt: new Date(),
-        });
+        try {
+            await markProjectReady(projectId, {
+                instanceId,
+                publicIp: publicIP,
+                containerName,
+                bootCompletedAt: new Date(),
+            });
+        } catch (err) {
+            const cancelled = await cancelProvisioningIfDeletionRequested({
+                projectId,
+                ownerId,
+                projectName,
+                projectType,
+                instanceId,
+                publicIP,
+                containerName,
+                phase: "mark_project_ready_transition",
+                logger,
+            });
+
+            if (cancelled) {
+                return null;
+            }
+
+            throw err;
+        }
 
         logger.info({
             instanceId,
@@ -574,6 +840,36 @@ export const ensureProjectRuntime = async (
         )
     }
     catch(err){
+        const latest = await getLatestProjectLifecycleState(projectId);
+
+        if (isDeletionTerminalOrInProgress(latest?.status)) {
+            logger.warn({
+                projectId,
+                userId: ownerId,
+                operation: "runtime.provisioning.cancelled",
+                status: "SKIPPED",
+                reason:
+                    err instanceof Error
+                        ? err.message
+                        : "Provisioning aborted because deletion won the race",
+                meta: {
+                    currentStatus: latest?.status ?? null,
+                },
+            });
+
+            await prisma.projectRoom.updateMany({
+                where: {
+                    projectId,
+                    userId: ownerId,
+                },
+                data: {
+                    vmState: "STOPPED",
+                },
+            });
+
+            return null;
+        }
+
         await updateProjectRoomVmState(projectId, ownerId, "FAILED");
         await markProjectFailed(
             projectId,
@@ -585,7 +881,6 @@ export const ensureProjectRuntime = async (
             }),
         );
 
-        
         throw err;
     }
 }

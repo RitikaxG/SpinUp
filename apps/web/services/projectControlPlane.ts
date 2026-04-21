@@ -317,6 +317,87 @@ export const createOrResumeProject = async ({
     return lockedResult;
 }
 
+const reconcileProjectDeletion = async ({
+    projectId,
+    ownerId,
+    projectName,
+    projectType,
+    logger,
+}: {
+    projectId: string;
+    ownerId: string;
+    projectName: string;
+    projectType: ProjectType;
+    logger: ReturnType<typeof createScopedLogger>;
+}): Promise<ControlPlaneResponse> => {
+    try {
+        const cleanupResult = await withProjectRuntimeLock(projectId, () =>
+            cleanupProjectRuntimeAssignment(projectId, ownerId),
+        );
+
+        if (!cleanupResult.lockAcquired) {
+            const snapshot = await buildProjectSnapshot(projectId);
+
+            logger.warn({
+                operation: "project.delete.runtime_lock_busy",
+                status: "SKIPPED",
+                reason: "Project runtime cleanup already in progress",
+                meta: {},
+            });
+
+            return {
+                httpStatus: 202,
+                message: "Project runtime cleanup already in progress",
+                project: snapshot.project,
+                runtime: snapshot.runtime,
+                inProgress: true,
+            };
+        }
+
+        await cleanupProjectArtifacts({
+            projectId,
+            projectName,
+            projectType,
+        });
+
+        const finalized = await finalizeProjectDeletion(projectId, ownerId);
+        const snapshot = await buildProjectSnapshot(projectId);
+
+        if (!finalized) {
+            return {
+                httpStatus: 202,
+                message: "Delete accepted but cleanup is still reconciling",
+                project: snapshot.project,
+                runtime: snapshot.runtime,
+                inProgress: true,
+            };
+        }
+
+        return {
+            httpStatus: 200,
+            message: `Project ${projectId} deleted successfully`,
+            project: snapshot.project,
+            runtime: null,
+            inProgress: false,
+        };
+    } catch (err) {
+        await markProjectDeletePendingReason(
+            projectId,
+            err instanceof Error ? err.message : "Unknown delete error",
+        );
+
+        const snapshot = await buildProjectSnapshot(projectId);
+
+        return {
+            httpStatus: 202,
+            message: "Delete accepted but cleanup is still reconciling",
+            project: snapshot.project,
+            runtime: snapshot.runtime,
+            inProgress: true,
+        };
+    }
+};
+
 export const deleteOrResumeProject = async({
     projectId,
     ownerId,
@@ -360,25 +441,23 @@ export const deleteOrResumeProject = async({
                 };
             }
 
-            if(ownedProject.status === "DELETING"){
-                const snapshot = await buildProjectSnapshot(projectId);
-
+            if (ownedProject.status === "DELETING") {
                 logger.warn({
-                    operation: "project.delete.already_in_progress",
-                    status: "SKIPPED",
-                    reason: "Project deletion is already in progress",
+                    operation: "project.delete.resume_requested",
+                    status: "INFO",
+                    reason: "Project is already DELETING; attempting to resume cleanup",
                     meta: {
                         currentStatus: ownedProject.status,
                     },
                 });
 
-                return {
-                    httpStatus: 202,
-                    message: "Project deletion is already in progress",
-                    project: snapshot.project,
-                    runtime: snapshot.runtime,
-                    inProgress: true,
-                }
+                return reconcileProjectDeletion({
+                    projectId,
+                    ownerId,
+                    projectName: ownedProject.name,
+                    projectType: ownedProject.type,
+                    logger,
+                });
             }
 
             await markProjectDeleting(projectId);
@@ -389,71 +468,13 @@ export const deleteOrResumeProject = async({
                 meta: {},
             });
 
-            try{
-                const cleanupResult = await withProjectRuntimeLock(projectId, () => 
-                    cleanupProjectRuntimeAssignment(projectId,ownerId), 
-                );
-
-                if(!cleanupResult.lockAcquired){
-                    const snapshot = await buildProjectSnapshot(projectId);
-
-                    logger.warn({
-                        operation: "project.delete.runtime_lock_busy",
-                        status: "SKIPPED",
-                        reason: "Project runtime cleanup already in progress",
-                        meta: {},
-                    });
-
-                    return {
-                        httpStatus: 202,
-                        message: "Project runtime cleanup already in progress",
-                        project: snapshot.project,
-                        runtime: snapshot.runtime,
-                        inProgress: true,
-                    }
-                }
-
-                await cleanupProjectArtifacts({
-                    projectId,
-                    projectName : ownedProject.name,
-                    projectType : ownedProject.type,
-                });
-
-                const finalized = await finalizeProjectDeletion(projectId,ownerId);
-                const snapshot = await buildProjectSnapshot(projectId);
-
-                if(!finalized){
-                    return {
-                        httpStatus : 202,
-                        message : "Delete accepted but cleanup is still reconciling",
-                        project : snapshot.project,
-                        runtime : snapshot.runtime,
-                        inProgress : true,
-                    }
-                }
-
-                return {
-                    httpStatus : 200,
-                    message : `Project ${projectId} deleted successfully`,
-                    project : snapshot.project,
-                    runtime : null,
-                    inProgress : false,
-                }
-            } catch (err ){
-                await markProjectDeletePendingReason(projectId, 
-                    err instanceof Error ? err.message : "Unknown delete error",
-                );
-
-                const snapshot = await buildProjectSnapshot(projectId);
-
-                return {
-                    httpStatus: 202,
-                    message: "Delete accepted but cleanup is still reconciling",
-                    project: snapshot.project,
-                    runtime: snapshot.runtime,
-                    inProgress: true,
-                }
-            }
+            return reconcileProjectDeletion({
+                projectId,
+                ownerId,
+                projectName: ownedProject.name,
+                projectType: ownedProject.type,
+                logger,
+            });
         }
     )
 
