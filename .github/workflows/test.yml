@@ -19,14 +19,17 @@ jobs:
         with:
           bun-version: 1.3.2
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Diagnose lockfile drift
+        run: |
+          bun --version
+          rm -rf node_modules apps/*/node_modules packages/*/node_modules
+          bun install
+          echo "----- git status -----"
+          git status --short
+          echo "----- bun.lock diff -----"
+          git diff -- bun.lock || true
+          echo "----- package manifest diff -----"
+          git diff -- package.json apps/*/package.json packages/*/package.json || true
 
-      - name: Generate Prisma client
-        run: cd packages/db && bun run db:generate
-
-      - name: Typecheck
-        run: bun run check-types
-
-      - name: Run web tests
-        run: bun run test:web
+      - name: Fail intentionally after diagnostics
+        run: exit 1
