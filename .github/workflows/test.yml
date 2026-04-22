@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
-  web-tests:
+  web-ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,6 +21,12 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: cd packages/db && bun run db:generate
+
+      - name: Typecheck
+        run: bun run check-types
 
       - name: Run web tests
         run: bun run test:web

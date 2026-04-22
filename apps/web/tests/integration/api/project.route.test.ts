@@ -28,6 +28,11 @@ vi.mock("@clerk/nextjs/server", () => ({
 
 vi.mock("db/client", () => ({
   prisma: mocks.prisma,
+  ProjectType: {
+    NEXTJS: "NEXTJS",
+    REACT: "REACT",
+    REACT_NATIVE: "REACT_NATIVE",
+  },
 }));
 
 vi.mock("../../../services/projectControlPlane", () => ({

@@ -72,6 +72,7 @@ vi.mock("../../../lib/observability/structuredLogger", () => ({
 import {
   checkRuntimeHealth,
   handleHeartbeatFailure,
+  handleHeartbeatSuccess,
 } from "../../../services/runtimeHeartbeatManager";
 
 describe("runtimeHeartbeatManager", () => {
@@ -150,6 +151,45 @@ describe("runtimeHeartbeatManager", () => {
     expect(result.reason).toContain("Health check failed");
   });
 
+  it("updates heartbeat state on successful health reconciliation", async () => {
+    const instance = makeInstanceRecord({
+      instanceId: "i-123",
+      projectId: "project_123",
+      userId: "user_123",
+    });
+
+    await handleHeartbeatSuccess(instance);
+
+    expect(mocks.updateInstanceHeartbeat).toHaveBeenCalledWith("i-123");
+    expect(mocks.resetHeartbeatFailure).toHaveBeenCalledWith("i-123");
+    expect(mocks.touchProjectHeartbeat).toHaveBeenCalledWith("project_123");
+  });
+
+  it("records a soft failure when threshold has not yet been reached", async () => {
+    const instance = makeInstanceRecord({
+      instanceId: "i-123",
+      projectId: "project_123",
+      userId: "user_123",
+      publicIP: "1.2.3.4",
+      containerName: "spinup-project_123",
+    });
+
+    mocks.incrementHeartbeatFailure.mockResolvedValue(1);
+
+    const outcome = await handleHeartbeatFailure(
+      instance,
+      "Health check failed: timeout",
+      "SOFT",
+    );
+
+    expect(outcome).toBe("SOFT_RECORDED");
+    expect(mocks.incrementHeartbeatFailure).toHaveBeenCalledWith(
+      "i-123",
+      "Health check failed: timeout",
+    );
+    expect(mocks.cleanupProjectRuntimeAssignment).not.toHaveBeenCalled();
+  });
+
   it("recovers runtime immediately on hard heartbeat failure", async () => {
     const instance = makeInstanceRecord({
       instanceId: "i-123",
@@ -199,5 +239,26 @@ describe("runtimeHeartbeatManager", () => {
       "project_123",
       "user_123",
     );
+  });
+
+  it("returns LOCKED_OR_SKIPPED when the recovery lock cannot be acquired", async () => {
+    const instance = makeInstanceRecord({
+      instanceId: "i-123",
+      projectId: "project_123",
+      userId: "user_123",
+      publicIP: "1.2.3.4",
+      containerName: "spinup-project_123",
+    });
+
+    mocks.withDistributedLock.mockResolvedValueOnce(null);
+
+    const outcome = await handleHeartbeatFailure(
+      instance,
+      "Container is stopped",
+      "HARD",
+    );
+
+    expect(outcome).toBe("LOCKED_OR_SKIPPED");
+    expect(mocks.cleanupProjectRuntimeAssignment).not.toHaveBeenCalled();
   });
 });

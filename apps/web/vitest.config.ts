@@ -24,6 +24,7 @@ export default defineConfig({
                 "services/ec2Manager.ts",
                 "services/redisManager.ts",
                 "services/runtimeHeartbeatManager.ts",
+                "services/asgManager.ts",
                 "lib/validators/project.ts",
             ],
             exclude: [

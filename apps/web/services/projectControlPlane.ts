@@ -41,6 +41,11 @@ type ControlPlaneResponse = {
     inProgress : boolean,
 };
 
+type CreateProjectLookupResult =
+  | { kind: "existing"; project: Project }
+  | { kind: "created"; project: Project }
+  | { kind: "conflict"; project: Project };
+
 const buildProjectSnapshot = async (
     projectId : string) : Promise< { project : Project | null; runtime : RuntimeAssignment | null}> => {
 
@@ -105,75 +110,114 @@ export const createOrResumeProject = async ({
         controlPlaneLockKeys.createProject(ownerId,normalizedName),
         CONTROL_PLANE_LOCK_TTL_MS,
         async () => {
-            let createdByThisRequest = false;
-
-            const project = await prisma.$transaction(async (tx) => {
+            const lookupResult = await prisma.$transaction<CreateProjectLookupResult>(
+            async (tx) => {
                 const existing = await tx.project.findFirst({
-                    where : {
-                        ownerId,
-                        name : normalizedName,
-                        deletedAt : null,
-                    }
+                where: {
+                    ownerId,
+                    name: normalizedName,
+                    deletedAt: null,
+                },
                 });
 
-                if(existing){
-                    logger.info({
-                        projectId: existing.id,
-                        operation: "project.existing.reused",
-                        status: "INFO",
-                        reason: "Existing non-deleted project found for owner and normalized name",
-                        meta: {
-                            currentStatus: existing.status,
-                        },
+                if (existing) {
+                if (existing.type !== type) {
+                    logger.warn({
+                    projectId: existing.id,
+                    operation: "project.name_type_conflict",
+                    status: "FAILED",
+                    reason:
+                        "Existing non-deleted project found for owner and normalized name, but with a different type",
+                    meta: {
+                        existingType: existing.type,
+                        requestedType: type,
+                    },
                     });
-                    return existing;
+
+                    return {
+                    kind: "conflict",
+                    project: existing,
+                    };
                 }
 
-                createdByThisRequest = true;
-                const now = new Date();
-
-                const created = await tx.project.create({
-                    data : {
-                        name : normalizedName,
-                        type,
-                        ownerId,
-                        status : "CREATED",
-                        lastEventType : "PROJECT_CREATED",
-                        lastEventMessage : "Project created",
-                        lastEventAt : now,
-                    }
-                });
-
-                await tx.projectRoom.create({
-                    data : {
-                        userId : ownerId,
-                        projectId : created.id,
-                    }
-                });
-
-                await tx.projectEvent.create({
-                    data : {
-                        projectId : created.id,
-                        ownerId,
-                        eventType : "PROJECT_CREATED",
-                        fromStatus : "CREATED",
-                        toStatus : "CREATED",
-                        message : "Project created",
-                    }
-                });
-
                 logger.info({
-                    projectId: created.id,
-                    operation: "project.db.created",
-                    status: "SUCCESS",
-                    reason: "Project row and initial project event created",
+                    projectId: existing.id,
+                    operation: "project.existing.reused",
+                    status: "INFO",
+                    reason:
+                    "Existing non-deleted project found for owner, normalized name, and matching type",
                     meta: {
-                        projectType: created.type,
+                    currentStatus: existing.status,
                     },
                 });
 
-                return created;
-            });
+                return {
+                    kind: "existing",
+                    project: existing,
+                };
+                }
+
+                const now = new Date();
+
+                const created = await tx.project.create({
+                data: {
+                    name: normalizedName,
+                    type,
+                    ownerId,
+                    status: "CREATED",
+                    lastEventType: "PROJECT_CREATED",
+                    lastEventMessage: "Project created",
+                    lastEventAt: now,
+                },
+                });
+
+                await tx.projectRoom.create({
+                data: {
+                    userId: ownerId,
+                    projectId: created.id,
+                },
+                });
+
+                await tx.projectEvent.create({
+                data: {
+                    projectId: created.id,
+                    ownerId,
+                    eventType: "PROJECT_CREATED",
+                    fromStatus: "CREATED",
+                    toStatus: "CREATED",
+                    message: "Project created",
+                },
+                });
+
+                logger.info({
+                projectId: created.id,
+                operation: "project.db.created",
+                status: "SUCCESS",
+                reason: "Project row and initial project event created",
+                meta: {
+                    projectType: created.type,
+                },
+                });
+
+                return {
+                kind: "created",
+                project: created,
+                };
+            },
+            );
+
+            if (lookupResult.kind === "conflict") {
+            return {
+                httpStatus: 409,
+                message: `A project named "${normalizedName}" already exists for this user under type ${lookupResult.project.type}. Rename it or delete the existing project before creating a ${type} project.`,
+                project: lookupResult.project,
+                runtime: null,
+                inProgress: false,
+            };
+            }
+
+            const project = lookupResult.project;
+            const createdByThisRequest = lookupResult.kind === "created";
 
             if(project.status === "DELETING"){
                 const snapshot = await buildProjectSnapshot(project.id);

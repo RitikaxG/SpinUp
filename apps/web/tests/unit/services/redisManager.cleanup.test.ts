@@ -1,157 +1,254 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeProject } from "../../factories/project";
+import { NextRequest, NextResponse } from "next/server";
+import {
+  makeCreateProjectBody,
+  makeDBUser,
+  makeProject,
+  makeRuntimeAssignment,
+} from "../../factories/project";
 
 const mocks = vi.hoisted(() => {
   return {
-    axiosPost: vi.fn(),
-    axiosGet: vi.fn(),
-    terminateAndScaleDown: vi.fn(),
-    deleteS3Object: vi.fn(),
+    currentUser: vi.fn(),
     prisma: {
-      project: {
-        findFirst: vi.fn(),
-      },
-      projectRoom: {
-        updateMany: vi.fn(),
+      user: {
+        findUnique: vi.fn(),
       },
     },
-    markProjectDeleted: vi.fn(),
-    markProjectDeletePendingReason: vi.fn(),
-    markProjectDeleting: vi.fn(),
-    clearProjectAssignmentSnapshot: vi.fn(),
-    getProjectRuntimeSnapshot: vi.fn(),
+    createOrResumeProject: vi.fn(),
+    deleteOrResumeProject: vi.fn(),
     logInfo: vi.fn(),
     logWarn: vi.fn(),
-    logError: vi.fn(),
   };
 });
 
-vi.mock("axios", () => ({
-  default: {
-    post: mocks.axiosPost,
-    get: mocks.axiosGet,
-  },
+vi.mock("@clerk/nextjs/server", () => ({
+  currentUser: mocks.currentUser,
 }));
 
 vi.mock("db/client", () => ({
   prisma: mocks.prisma,
+  ProjectType: {
+    NEXTJS: "NEXTJS",
+    REACT: "REACT",
+    REACT_NATIVE: "REACT_NATIVE",
+  },
 }));
 
-vi.mock("../../../lib/aws/asgCommands", () => ({
-  terminateAndScaleDown: mocks.terminateAndScaleDown,
-}));
-
-vi.mock("../../../lib/aws/s3Commands", () => ({
-  deleteS3Object: mocks.deleteS3Object,
-}));
-
-vi.mock("../../../services/projectLifecycleManager", () => ({
-  markProjectDeleted: mocks.markProjectDeleted,
-  markProjectDeletePendingReason: mocks.markProjectDeletePendingReason,
-  markProjectDeleting: mocks.markProjectDeleting,
-}));
-
-vi.mock("../../../services/projectRuntimeTruthSource", () => ({
-  clearProjectAssignmentSnapshot: mocks.clearProjectAssignmentSnapshot,
-  getProjectRuntimeSnapshot: mocks.getProjectRuntimeSnapshot,
+vi.mock("../../../services/projectControlPlane", () => ({
+  createOrResumeProject: mocks.createOrResumeProject,
+  deleteOrResumeProject: mocks.deleteOrResumeProject,
 }));
 
 vi.mock("../../../lib/observability/structuredLogger", () => ({
   logInfo: mocks.logInfo,
   logWarn: mocks.logWarn,
-  logError: mocks.logError,
 }));
 
-import {
-  cleanupProjectRuntimeAssignment,
-  getInstance,
-  getInstanceIdForProject,
-  getInstanceIdForUser,
-  writeRunningInstance,
-} from "../../../services/redisManager";
+import { DELETE, POST } from "../../../app/api/project/route";
 
-describe("redisManager cleanup paths", () => {
+const expectRouteResponse = (
+  response: NextResponse | undefined,
+): NextResponse => {
+  if (!response) {
+    throw new Error("Expected route handler to return a response");
+  }
+
+  return response;
+};
+
+describe("app/api/project/route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.clearProjectAssignmentSnapshot.mockResolvedValue({});
-    mocks.prisma.projectRoom.updateMany.mockResolvedValue({ count: 1 });
+
+    mocks.currentUser.mockResolvedValue({
+      id: "clerk_123",
+    });
+
+    mocks.prisma.user.findUnique.mockResolvedValue(
+      makeDBUser({
+        id: "user_123",
+        clerkId: "clerk_123",
+      }),
+    );
   });
 
-  it("cleans up runtime when mappings exist and returns a healthy instance to idle", async () => {
+  it("handles create project happy path", async () => {
     const project = makeProject({
       id: "project_123",
       ownerId: "user_123",
+      status: "READY",
+    });
+
+    const runtime = makeRuntimeAssignment({
+      projectId: project.id,
+      userId: "user_123",
+    });
+
+    mocks.createOrResumeProject.mockResolvedValue({
+      httpStatus: 201,
+      message: "Project created and runtime ready",
+      project,
+      runtime,
+      inProgress: false,
+    });
+
+    const request = new NextRequest("http://localhost:3000/api/project", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(makeCreateProjectBody()),
+    });
+
+    const response = expectRouteResponse(await POST(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(mocks.createOrResumeProject).toHaveBeenCalledWith({
+      ownerId: "user_123",
       name: "SpinUp Demo",
       type: "NEXTJS",
-      assignedInstanceId: "i-123",
-      publicIp: "1.2.3.4",
-      containerName: "spinup-project_123",
     });
-
-    mocks.prisma.project.findFirst.mockResolvedValue(project);
-    mocks.axiosPost.mockResolvedValue({ data: { ok: true } });
-    mocks.axiosGet.mockResolvedValue({ data: "OK" });
-
-    await writeRunningInstance({
-      instanceId: "i-123",
-      userId: "user_123",
-      projectId: "project_123",
-      projectName: "SpinUp Demo",
-      projectType: "NEXTJS",
-      publicIP: "1.2.3.4",
-      containerName: "spinup-project_123",
-    });
-
-    const message = await cleanupProjectRuntimeAssignment(
-      "project_123",
-      "user_123",
-    );
-
-    const record = await getInstance("i-123");
-
-    expect(record?.status).toBe("IDLE");
-    expect(record?.inUse).toBe("false");
-    expect(await getInstanceIdForProject("project_123")).toBeNull();
-    expect(await getInstanceIdForUser("user_123")).toBeNull();
-    expect(mocks.clearProjectAssignmentSnapshot).toHaveBeenCalledWith(
-      "project_123",
-    );
-    expect(message).toContain("Returned healthy instance");
+    expect(json.project.id).toBe("project_123");
   });
 
-  it("cleans up safely when project has no active assigned instance", async () => {
-    const staleProject = makeProject({
-      id: "project_999",
+  it("returns 409 when the control plane reports a same-name different-type conflict", async () => {
+    const project = makeProject({
+      id: "project_conflict",
       ownerId: "user_123",
-      name: "Old Demo",
-      type: "NEXTJS",
-      assignedInstanceId: null,
-      publicIp: null,
-      containerName: null,
+      name: "SpinUp Demo",
+      type: "REACT",
+      status: "READY",
     });
 
-    mocks.prisma.project.findFirst.mockResolvedValue(staleProject);
-
-    await writeRunningInstance({
-      instanceId: "i-stale",
-      userId: "user_123",
-      projectId: "project_999",
-      projectName: "Old Demo",
-      projectType: "NEXTJS",
-      publicIP: "9.9.9.9",
-      containerName: "spinup-project_999",
+    mocks.createOrResumeProject.mockResolvedValue({
+      httpStatus: 409,
+      message:
+        'A project named "SpinUp Demo" already exists for this user under type REACT. Rename it or delete the existing project before creating a NEXTJS project.',
+      project,
+      runtime: null,
+      inProgress: false,
     });
 
-    const message = await cleanupProjectRuntimeAssignment(
-      "project_999",
-      "user_123",
+    const request = new NextRequest("http://localhost:3000/api/project", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(makeCreateProjectBody()),
+    });
+
+    const response = expectRouteResponse(await POST(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(json.message).toContain("already exists");
+    expect(json.project.id).toBe("project_conflict");
+  });
+
+  it("returns 202 when provisioning is already in progress", async () => {
+    const project = makeProject({
+      id: "project_123",
+      ownerId: "user_123",
+      status: "ALLOCATING_VM",
+    });
+
+    mocks.createOrResumeProject.mockResolvedValue({
+      httpStatus: 202,
+      message: "Project runtime provisioning is already in progress",
+      project,
+      runtime: null,
+      inProgress: true,
+    });
+
+    const request = new NextRequest("http://localhost:3000/api/project", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(makeCreateProjectBody()),
+    });
+
+    const response = expectRouteResponse(await POST(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(202);
+    expect(json.inProgress).toBe(true);
+    expect(json.message).toContain("already in progress");
+  });
+
+  it("handles delete project happy path", async () => {
+    const project = makeProject({
+      id: "project_123",
+      ownerId: "user_123",
+      status: "DELETED",
+    });
+
+    mocks.deleteOrResumeProject.mockResolvedValue({
+      httpStatus: 200,
+      message: "Project project_123 deleted successfully",
+      project,
+      runtime: null,
+      inProgress: false,
+    });
+
+    const request = new NextRequest(
+      "http://localhost:3000/api/project?id=project_123",
+      {
+        method: "DELETE",
+      },
     );
 
-    expect(await getInstanceIdForProject("project_999")).toBeNull();
-    expect(await getInstanceIdForUser("user_123")).toBeNull();
-    expect(mocks.clearProjectAssignmentSnapshot).toHaveBeenCalledWith(
-      "project_999",
+    const response = expectRouteResponse(await DELETE(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(mocks.deleteOrResumeProject).toHaveBeenCalledWith({
+      projectId: "project_123",
+      ownerId: "user_123",
+    });
+    expect(json.project.id).toBe("project_123");
+  });
+
+  it("returns 401 for unauthorized access", async () => {
+    mocks.currentUser.mockResolvedValue(null);
+
+    const request = new NextRequest("http://localhost:3000/api/project", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(makeCreateProjectBody()),
+    });
+
+    const response = expectRouteResponse(await POST(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(json.error).toBe("Unauthorised");
+  });
+
+  it("blocks cross-user delete access", async () => {
+    mocks.deleteOrResumeProject.mockResolvedValue({
+      httpStatus: 403,
+      message: "You do not have access to this project",
+      project: null,
+      runtime: null,
+      inProgress: false,
+    });
+
+    const request = new NextRequest(
+      "http://localhost:3000/api/project?id=project_other_user",
+      {
+        method: "DELETE",
+      },
     );
-    expect(message).toContain("No active instance");
+
+    const response = expectRouteResponse(await DELETE(request));
+    const json = await response.json();
+
+    expect(response.status).toBe(403);
+    expect(json.message).toContain("do not have access");
   });
 });

@@ -159,6 +159,178 @@ describe("projectControlPlane", () => {
     expect(result.runtime?.instanceId).toBe(runtime.instanceId);
   });
 
+  it("reuses an existing project when normalized name and type match", async () => {
+    const existingProject = makeProject({
+      id: "project_existing",
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS",
+      status: "STOPPED",
+    });
+
+    const readySnapshot = makeProject({
+      ...existingProject,
+      status: "READY",
+      assignedInstanceId: "i-123",
+      publicIp: "1.2.3.4",
+      containerName: "spinup-project_existing",
+    });
+
+    const runtime = makeRuntimeAssignment({
+      projectId: existingProject.id,
+      projectName: existingProject.name,
+      projectType: existingProject.type,
+      userId: existingProject.ownerId,
+      containerName: "spinup-project_existing",
+    });
+
+    mocks.tx.project.findFirst.mockResolvedValue(existingProject);
+    mocks.markProjectAllocating.mockResolvedValue({});
+    mocks.ensureProjectRuntime.mockResolvedValue(runtime);
+    mocks.getProjectRuntimeSnapshot.mockResolvedValue({
+      project: readySnapshot,
+      runtime: null,
+    });
+
+    const result = await createOrResumeProject({
+      ownerId: "user_123",
+      name: "  SpinUp   Demo  ",
+      type: "NEXTJS" as any,
+    });
+
+    expect(mocks.tx.project.create).not.toHaveBeenCalled();
+    expect(mocks.markProjectAllocating).toHaveBeenCalledWith(existingProject.id);
+    expect(mocks.ensureProjectRuntime).toHaveBeenCalledWith(
+      existingProject.id,
+      existingProject.name,
+      existingProject.type,
+      existingProject.ownerId,
+    );
+    expect(result.httpStatus).toBe(200);
+    expect(result.inProgress).toBe(false);
+  });
+
+  it("returns 409 when the same normalized name exists under a different type", async () => {
+    const conflictingProject = makeProject({
+      id: "project_conflict",
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "REACT",
+      status: "READY",
+    });
+
+    mocks.tx.project.findFirst.mockResolvedValue(conflictingProject);
+
+    const result = await createOrResumeProject({
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS" as any,
+    });
+
+    expect(result.httpStatus).toBe(409);
+    expect(result.inProgress).toBe(false);
+    expect(result.message).toContain("already exists");
+    expect(result.message).toContain("REACT");
+    expect(mocks.markProjectAllocating).not.toHaveBeenCalled();
+    expect(mocks.ensureProjectRuntime).not.toHaveBeenCalled();
+    expect(mocks.tx.project.create).not.toHaveBeenCalled();
+  });
+
+  it("returns the existing runtime when the project is already READY", async () => {
+    const readyProject = makeProject({
+      id: "project_ready",
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS",
+      status: "READY",
+      assignedInstanceId: "i-ready",
+      publicIp: "1.2.3.4",
+      containerName: "spinup-project_ready",
+    });
+
+    mocks.tx.project.findFirst.mockResolvedValue(readyProject);
+    mocks.getProjectRuntimeSnapshot.mockResolvedValue({
+      project: readyProject,
+      runtime: {
+        userId: "user_123",
+        instanceId: "i-ready",
+        publicIp: "1.2.3.4",
+        projectId: "project_ready",
+        projectName: "SpinUp Demo",
+        projectType: "NEXTJS",
+        containerName: "spinup-project_ready",
+      },
+    });
+
+    const result = await createOrResumeProject({
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS" as any,
+    });
+
+    expect(result.httpStatus).toBe(200);
+    expect(result.inProgress).toBe(false);
+    expect(result.runtime?.instanceId).toBe("i-ready");
+    expect(mocks.markProjectAllocating).not.toHaveBeenCalled();
+    expect(mocks.ensureProjectRuntime).not.toHaveBeenCalled();
+  });
+
+  it("returns 202 when VM allocation is already in progress", async () => {
+    const allocatingProject = makeProject({
+      id: "project_allocating",
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS",
+      status: "ALLOCATING_VM",
+    });
+
+    mocks.tx.project.findFirst.mockResolvedValue(allocatingProject);
+    mocks.getProjectRuntimeSnapshot.mockResolvedValue({
+      project: allocatingProject,
+      runtime: null,
+    });
+
+    const result = await createOrResumeProject({
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS" as any,
+    });
+
+    expect(result.httpStatus).toBe(202);
+    expect(result.inProgress).toBe(true);
+    expect(result.message).toContain("already in progress");
+    expect(mocks.ensureProjectRuntime).not.toHaveBeenCalled();
+  });
+
+  it("returns 202 when container boot is already in progress", async () => {
+    const bootingProject = makeProject({
+      id: "project_booting",
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS",
+      status: "BOOTING_CONTAINER",
+      assignedInstanceId: "i-123",
+      publicIp: "1.2.3.4",
+    });
+
+    mocks.tx.project.findFirst.mockResolvedValue(bootingProject);
+    mocks.getProjectRuntimeSnapshot.mockResolvedValue({
+      project: bootingProject,
+      runtime: null,
+    });
+
+    const result = await createOrResumeProject({
+      ownerId: "user_123",
+      name: "SpinUp Demo",
+      type: "NEXTJS" as any,
+    });
+
+    expect(result.httpStatus).toBe(202);
+    expect(result.inProgress).toBe(true);
+    expect(result.message).toContain("already in progress");
+    expect(mocks.ensureProjectRuntime).not.toHaveBeenCalled();
+  });
+
   it("returns 403 when delete is requested by a non-owner", async () => {
     mocks.prisma.project.findFirst.mockResolvedValue(null);
 
