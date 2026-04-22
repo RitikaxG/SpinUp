@@ -40,3 +40,5 @@ apps/vm-base-config/.env
 apps/vm-base-config/.env
 
 **/package-lock.json
+**/yarn.lock
+**/pnpm-lock.yaml
