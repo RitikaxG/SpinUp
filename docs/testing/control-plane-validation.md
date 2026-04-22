@@ -2,10 +2,10 @@
 
 This document records the manual end-to-end validation of SpinUp’s control plane, runtime allocation flow, lifecycle transitions, cleanup behavior, heartbeat recovery, and authorization boundaries.
 
-The goal of this validation pass was simple:
+The goal of this validation pass was to prove:
 
-- prove one clean happy path
-- prove the 6 non-negotiable edge cases before demo
+- one clean happy path
+- the 6 non-negotiable edge cases before demo
 
 ---
 
@@ -274,3 +274,220 @@ The runtime container was intentionally stopped using the VM agent:
 curl -i -X POST "http://15.207.86.233:3000/stop" \
   -H "Content-Type: application/json" \
   -d '{"containerName":"spinup-cmo8iau3k000gj6y8vpdj99gm"}'
+```
+
+![Stop container](../../images/stop_container.png)
+
+### Verify the container is stopped
+
+```bash
+curl -i -X POST "http://15.207.86.233:3000/containerStatus" \
+  -H "Content-Type: application/json" \
+  -d '{"containerName":"spinup-cmo8iau3k000gj6y8vpdj99gm"}'
+```
+
+![Check container stopped](../../images/check_container_stopped.png)
+
+### Heartbeat recovery evidence
+These screenshots show the reconcile path and final state after failure recovery:
+
+![Heartbeat logs](../../images/heartbeat_logs.png)
+![Heartbeat recovered verify](../../images/heartbeat_recovered.png)
+![Heartbeat lifecycle](../../images/heartbeat_lifecycle.png)
+
+---
+
+# 7. Unauthenticated requests are blocked
+
+Tested `POST /api/project` without an authenticated Clerk user.
+
+## What was verified
+
+- request returned `401`
+- logs recorded auth failure
+- no project was created
+
+## What this proved
+
+- route-level authentication enforcement works
+
+## Result
+
+**Pass**
+
+## Evidence
+
+![Unauthorized access blocked](../../images/auth_check.png)
+
+---
+
+# 8. Cross-user delete is forbidden
+
+Tested deleting User A’s project while signed in as User B.
+
+## What was verified
+
+- request returned `403`
+- response reason indicated lack of access
+- target project remained unchanged in DB
+- owner remained correct
+- project was not deleted
+
+## What this proved
+
+- owner-scoped authorization works
+- cross-user delete is blocked correctly
+
+## Result
+
+**Pass**
+
+## Evidence
+
+These screenshots show the forbidden delete attempt and DB proof that the target project remained unchanged:
+
+![Delete as user B](../../images/delete_as_user_B.png)
+![Ownership verification](../../images/ownership_test.png)
+
+---
+
+# Additional behavior verified
+
+## Single active runtime per user
+
+Tested creating a second project for the same user while another project already had an active runtime.
+
+## What was verified
+
+- old project runtime was cleaned up
+- instance was returned to idle
+- the same instance was reassigned to the new project
+- only one active runtime remained for the user
+- Redis mapped the active instance only to the new project
+- `ProjectRoom.vmState` showed:
+  - old project: `STOPPED`
+  - new project: `RUNNING`
+
+A follow-up improvement was made so the old project transitions cleanly to an inactive lifecycle state instead of remaining semantically stale.
+
+## What this proved
+
+- single-runtime-per-user policy works
+- runtime handoff is consistent across DB, `ProjectRoom`, and Redis
+
+## Result
+
+**Pass**
+
+## Evidence
+
+### Application logs
+These screenshots show the previous project being stopped and the runtime being reassigned to the new project:
+
+![Single runtime per user - logs 1](../../images/create_project_same_user1.png)
+![Single runtime per user - logs 2](../../images/create_project_same_user2.png)
+
+### Project table verification
+The following query was used to verify that only the new project retained the active runtime:
+
+```sql
+SELECT id, name, status, "assignedInstanceId", "publicIp", "containerName", "lastEventType", "lastEventMessage"
+FROM "Project"
+WHERE id IN (
+  'cmo9qp7se000as6y8wwrof77m',   -- first project
+  'cmo9qpn49000gs6y8ouzt2ioi'    -- second project
+);
+```
+
+![Single runtime per user - project table](../../images/verify_one_project_per_user.png)
+
+### ProjectRoom verification
+The following query was used to verify current runtime state per project:
+
+```sql
+SELECT "projectId", "userId", "vmState"
+FROM "ProjectRoom"
+WHERE "projectId" IN (
+  'cmo9qp7se000as6y8wwrof77m',
+  'cmo9qpn49000gs6y8ouzt2ioi'
+);
+```
+
+![Single runtime per user - project room](../../images/verify_project_status_one_user.png)
+
+---
+
+# Final result
+
+## Happy path
+- pass
+
+## Edge cases
+- repeated create request: pass
+- delete during boot: pass
+- delete after ready: pass
+- no idle instance available: pass
+- heartbeat failure path: pass
+- unauthenticated blocked: pass
+- cross-user delete blocked: pass
+
+---
+
+# Features validated by this test pass
+
+This validation cycle proved the following parts of SpinUp are working:
+
+- project creation and control plane orchestration
+- lifecycle transition correctness
+- distributed create / delete / runtime locking
+- VM allocation and warm-pool behavior
+- runtime reassignment for the same user
+- VM agent health checks
+- container boot and readiness checks
+- Redis runtime assignment mirroring
+- runtime cleanup and deletion finalization
+- heartbeat monitoring and recovery
+- unauthenticated access blocking
+- owner-scoped authorization
+
+---
+
+# Important fixes discovered during testing
+
+## Delete-during-boot race
+A real race was found where delete could move a project to `DELETING` while provisioning still tried to continue boot. This was fixed by making provisioning deletion-aware and by allowing delete requests to resume cleanup reconciliation.
+
+## Old project stale-ready semantics
+When a new project for the same user took over the runtime, the old project originally retained a stale `READY` lifecycle status even after its runtime was detached. This was improved so the old project transitions cleanly to an inactive / stopped state.
+
+## Warm-pool stability
+Cold-start behavior is more fragile than warm-pool behavior. For reliable demo performance, maintaining at least one warm idle VM (`min idle = 1`) significantly improves success rate.
+
+---
+
+# Recommended demo operating mode
+
+For reliable demos:
+
+- maintain at least one warm idle VM
+- keep autoscaling enabled for overflow
+- preserve strict lifecycle transitions
+- keep heartbeat reconcile enabled
+- avoid preserving failed runtimes unless actively debugging
+
+---
+
+# Attached evidence
+
+This validation report is backed by:
+
+- application logs
+- SQL queries against:
+  - `Project`
+  - `ProjectEvent`
+  - `ProjectRoom`
+- Redis state checks
+- HTTP request / response screenshots
+- manual VM agent command results
+
+All screenshots and query outputs are attached alongside this document.
