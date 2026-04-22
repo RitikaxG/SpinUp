@@ -38,3 +38,5 @@ dist/
 apps/vm-base-config/.env
 .env
 apps/vm-base-config/.env
+
+**/package-lock.json
