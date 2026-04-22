@@ -27,14 +27,15 @@ type LifecycleEventInput = {
 }
 
 const ALLOWED_TRANSITIONS : Record<ProjectLifecycleStatus, ProjectLifecycleStatus[]> = {
-    CREATED: ["ALLOCATING_VM","FAILED","DELETING"],
-    ALLOCATING_VM:["BOOTING_CONTAINER","READY","FAILED","DELETING"],
-    BOOTING_CONTAINER:["READY","FAILED","DELETING"],
-    READY:["FAILED","DELETING"],
-    FAILED: ["ALLOCATING_VM","DELETING"],
-    DELETING: ["DELETED","FAILED"],
-    DELETED:[],
-}
+    CREATED: ["ALLOCATING_VM", "FAILED", "DELETING"],
+    ALLOCATING_VM: ["BOOTING_CONTAINER", "READY", "STOPPED", "FAILED", "DELETING"],
+    BOOTING_CONTAINER: ["READY", "STOPPED", "FAILED", "DELETING"],
+    READY: ["STOPPED", "FAILED", "DELETING"],
+    STOPPED: ["ALLOCATING_VM", "DELETING"],
+    FAILED: ["ALLOCATING_VM", "DELETING"],
+    DELETING: ["DELETED", "FAILED"],
+    DELETED: [],
+};
 
 const getProjectStatus = async ( projectId : string ) => {
     const current = await prisma.project.findUnique({
@@ -295,6 +296,43 @@ export const markProjectReady = async (
         containerName,
     })
 }
+
+export const markProjectStopped = async (
+    projectId: string,
+    {
+        reason,
+        instanceId,
+        publicIp,
+        containerName,
+        metadata,
+    }: {
+        reason: string;
+        instanceId?: string | null;
+        publicIp?: string | null;
+        containerName?: string | null;
+        metadata?: Prisma.InputJsonValue;
+    },
+) => {
+    return transitionProject(
+        projectId,
+        "STOPPED",
+        {
+            assignedInstanceId: null,
+            publicIp: null,
+            containerName: null,
+            lastHeartbeatAt: null,
+            statusReason: null,
+        },
+        {
+            eventType: "PROJECT_STOPPED",
+            message: reason,
+            instanceId: instanceId ?? null,
+            publicIp: publicIp ?? null,
+            containerName: containerName ?? null,
+            metadata,
+        },
+    );
+};
 
 export const markProjectFailed = async(
     projectId : string,

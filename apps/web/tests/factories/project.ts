@@ -6,6 +6,7 @@ type ProjectStatusValue =
   | "ALLOCATING_VM"
   | "BOOTING_CONTAINER"
   | "READY"
+  | "STOPPED"
   | "FAILED"
   | "DELETING"
   | "DELETED";

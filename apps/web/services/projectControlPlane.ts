@@ -226,7 +226,11 @@ export const createOrResumeProject = async ({
                 };
             }
 
-            if(project.status === "CREATED" || project.status === "FAILED"){
+            if (
+                project.status === "CREATED" ||
+                project.status === "FAILED" ||
+                project.status === "STOPPED"
+            ) {
                 await markProjectAllocating(project.id);
             }
             

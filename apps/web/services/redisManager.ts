@@ -3,7 +3,7 @@ import { terminateAndScaleDown } from "../lib/aws/asgCommands";
 import axios from "axios";
 import { deleteS3Object } from "../lib/aws/s3Commands";
 import { prisma } from "db/client";
-import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
+import { markProjectDeleted, markProjectDeletePendingReason, markProjectDeleting, markProjectStopped } from "./projectLifecycleManager";
 import { randomUUID } from "crypto";
 import { clearProjectAssignmentSnapshot, getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { logError, logInfo, logWarn } from "../lib/observability/structuredLogger";
@@ -580,6 +580,8 @@ const bestEffortTerminateInstance = async(
     }
 }
 
+export type RuntimeCleanupMode = "DELETE" | "RECOVERY" | "REASSIGN";
+
 export const cleanupProjectArtifacts = async ({
     projectId,
     projectName,
@@ -801,6 +803,13 @@ const recycleInstanceIfHealthy = async(instanceMetaData : InstanceRecord) => {
 export const cleanupProjectRuntimeAssignment = async (
   projectId: string,
   ownerId: string,
+  {
+    mode = "DELETE",
+    stopReason,
+  }: {
+    mode?: RuntimeCleanupMode;
+    stopReason?: string;
+  } = {},
 ) => {
 
   logInfo({
@@ -844,13 +853,24 @@ export const cleanupProjectRuntimeAssignment = async (
 
   const instanceId = ownedProject.assignedInstanceId;
 
-  if (!instanceId) {
+    if (!instanceId) {
     await deleteInstanceMappings({
       userId: ownerId,
       projectId,
     });
 
-    await clearProjectAssignmentSnapshot(projectId);
+    if (mode === "REASSIGN") {
+      await markProjectStopped(projectId, {
+        reason:
+          stopReason ??
+          "Project runtime was stopped because another project for this user took over the available VM",
+        metadata: {
+          source: "single_runtime_per_user_reassign",
+        },
+      });
+    } else {
+      await clearProjectAssignmentSnapshot(projectId);
+    }
 
     await prisma.projectRoom.updateMany({
       where: {
@@ -868,7 +888,9 @@ export const cleanupProjectRuntimeAssignment = async (
         operation: "runtime.cleanup.completed",
         status: "SUCCESS",
         reason: "No active instance for project",
-        meta: {},
+        meta: {
+          mode,
+        },
     });
 
     return `No active instance for project ${projectId}`;
@@ -893,14 +915,29 @@ export const cleanupProjectRuntimeAssignment = async (
     status: "RUNNING"
   }
 
-  const result = await recycleInstanceIfHealthy(instanceMetaData);
-
-  await clearProjectAssignmentSnapshot(projectId);
+    const result = await recycleInstanceIfHealthy(instanceMetaData);
 
   await deleteInstanceMappings({
-    userId : ownerId,
+    userId: ownerId,
     projectId,
-  })
+  });
+
+  if (mode === "REASSIGN") {
+    await markProjectStopped(projectId, {
+      reason:
+        stopReason ??
+        "Project runtime was stopped because another project for this user took over the available VM",
+      instanceId: instanceMetaData.instanceId,
+      publicIp: instanceMetaData.publicIP || null,
+      containerName: instanceMetaData.containerName || null,
+      metadata: {
+        source: "single_runtime_per_user_reassign",
+        disposition: result.disposition,
+      },
+    });
+  } else {
+    await clearProjectAssignmentSnapshot(projectId);
+  }
 
   await prisma.projectRoom.updateMany({
     where: {
@@ -912,7 +949,7 @@ export const cleanupProjectRuntimeAssignment = async (
     },
   });
 
-  logInfo({
+    logInfo({
         projectId,
         userId: ownerId,
         instanceId,
@@ -923,6 +960,7 @@ export const cleanupProjectRuntimeAssignment = async (
         meta: {
             disposition: result.disposition,
             publicIP: instanceMetaData.publicIP,
+            mode,
         },
     });
 

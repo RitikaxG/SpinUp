@@ -436,8 +436,12 @@ export const ensureProjectRuntime = async (
             }
         })
        
-        if(anotherActiveProject){
-            await cleanupProjectRuntimeAssignment(anotherActiveProject.id, ownerId);
+        if (anotherActiveProject) {
+            await cleanupProjectRuntimeAssignment(anotherActiveProject.id, ownerId, {
+                mode: "REASSIGN",
+                stopReason:
+                    `Project runtime was stopped because another project for user ${ownerId} took over the available VM`,
+            });
         }
         
     
