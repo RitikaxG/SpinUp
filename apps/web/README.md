@@ -1,28 +1,92 @@
-## Getting Started
+# SpinUp Web App
 
-First, run the development server:
+This package contains the SpinUp control plane, API routes, runtime orchestration logic, and the background worker used for reconciliation.
+
+## What lives here
+
+- `app/api/project/route.ts` — create and delete project endpoints
+- `services/projectControlPlane.ts` — create/delete orchestration
+- `services/ec2Manager.ts` — VM allocation and runtime boot flow
+- `services/redisManager.ts` — Redis lifecycle mirrors, distributed locks, and cleanup helpers
+- `services/runtimeHeartbeatManager.ts` — runtime health checks and recovery flow
+- `services/asgManager.ts` — warm-pool and autoscaling decisions
+- `services/controlPlaneReconciler.ts` — worker tick entry point
+- `scripts/control-plane-worker.ts` — long-running reconciliation worker
+
+## Current v1 behavior
+
+### One active runtime per user
+SpinUp v1 supports one active runtime per user.
+
+If a user starts another project while one runtime is already active, the currently active runtime is cleaned up and the new project takes over the available capacity.
+
+### Project naming rule
+Project names are unique per user regardless of type.
+
+That means the same user cannot create both:
+
+- `My App` as `NEXTJS`
+- `My App` as `REACT`
+
+at the same time.
+
+If the normalized project name already exists under a different type, the API returns `409`.
+
+### Long-running create requests
+Project creation may wait for an idle VM from the warm pool. In the current v1 flow, the control plane can wait for up to roughly 180 seconds before failing the request.
+
+This package should therefore run on a persistent Node/container deployment rather than a short-timeout serverless path.
+
+## Local commands
+
+Start the app:
 
 ```bash
-yarn dev
+bun run dev
 ```
 
-Open [http://localhost:3001](http://localhost:3001) with your browser to see the result.
+Typecheck:
 
-You can start editing the page by modifying `src/app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+bun run check-types
+```
 
-To create [API routes](https://nextjs.org/docs/app/building-your-application/routing/router-handlers) add an `api/` directory to the `app/` directory with a `route.ts` file. For individual endpoints, create a subfolder in the `api` directory, like `api/hello/route.ts` would map to [http://localhost:3001/api/hello](http://localhost:3001/api/hello).
+Run tests:
 
-## Learn More
+```bash
+bun run test
+```
 
-To learn more about Next.js, take a look at the following resources:
+Run coverage:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn/foundations/about-nextjs) - an interactive Next.js tutorial.
+```bash
+bun run test:coverage
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js/) - your feedback and contributions are welcome!
+Run the control-plane worker:
 
-## Deploy on Vercel
+```bash
+bun run control-plane:worker
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_source=github.com&utm_medium=referral&utm_campaign=turborepo-readme) from the creators of Next.js.
+## Test strategy
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/deployment) for more details.
+The test suite here is intentionally designed to pass in CI without real AWS infrastructure.
+
+CI covers:
+
+- schema validation
+- route response contracts
+- control-plane branching
+- cleanup logic
+- heartbeat recovery logic
+- autoscaling decision logic
+
+Manual validation still matters for:
+
+- real AWS VM allocation
+- VM agent reachability
+- real container boot behavior
+- Redis flush/rehydration smoke checks
+- worker deployment
+- full end-to-end lifecycle validation
