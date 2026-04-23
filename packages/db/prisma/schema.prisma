@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -57,102 +52,92 @@ enum ProjectType {
   REACT_NATIVE
 }
 
-// 1 User => Many Projects
-model User{
-  id               String @default(cuid()) @id
-  clerkId          String @unique
-  email            String @unique
-  name             String
-  provider         String?
-  profileImageUrl  String?
-  providerUserId   String?
+model User {
+  id              String   @id @default(cuid())
+  clerkId         String   @unique
+  email           String   @unique
+  name            String
+  provider        String?
+  profileImageUrl String?
+  providerUserId  String?
   createdAt       DateTime @default(now())
 
-  // Projects this user owns
-  ownedProjects Project[] @relation("ProjectOwner")
-
-  // Projects this user is a member of
-  projectRooms        ProjectRoom[]
+  ownedProjects Project[]    @relation("ProjectOwner")
+  projectRooms  ProjectRoom[]
 }
 
-// 1 Project => Many Users ( Devs )
 model Project {
-  id        String   @id @default(cuid())
-  name      String   
-  type      ProjectType
-  ownerId   String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(cuid())
+  name           String
+  normalizedName String
+  type           ProjectType
+  ownerId        String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
-  status ProjectLifecycleStatus @default(CREATED)
-  statusReason String?
+  status             ProjectLifecycleStatus @default(CREATED)
+  statusReason       String?
   assignedInstanceId String?
-  containerName String?
-  publicIp String?
-  bootStartedAt DateTime?
-  bootCompletedAt DateTime?
-  lastHeartbeatAt DateTime?
-  cleanupStartedAt DateTime?
+  containerName      String?
+  publicIp           String?
+  bootStartedAt      DateTime?
+  bootCompletedAt    DateTime?
+  lastHeartbeatAt    DateTime?
+  cleanupStartedAt   DateTime?
   cleanupCompletedAt DateTime?
-  deletedAt DateTime?
+  deletedAt          DateTime?
 
-  lastEventType ProjectEventType?
+  lastEventType    ProjectEventType?
   lastEventMessage String?
-  lastEventAt DateTime?
+  lastEventAt      DateTime?
 
-  // Actual owner of the project
-  owner User @relation("ProjectOwner",fields: [ownerId], references: [id], onDelete: Cascade)
+  owner   User          @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members ProjectRoom[]
+  events  ProjectEvent[]
 
-  // Members
-  members   ProjectRoom[]
-  events   ProjectEvent[]
-  
-  @@index([ownerId,name])
+  @@index([ownerId, name])
+  @@index([ownerId, normalizedName])
   @@index([ownerId])
   @@index([status])
-  @@index([ownerId,status])
-
+  @@index([ownerId, status])
   @@index([assignedInstanceId])
-  @@index([deletedAt,status])
-  @@index([ownerId,deletedAt,status])
+  @@index([deletedAt, status])
+  @@index([ownerId, deletedAt, status])
 }
 
-// Each User-Project link is stored here
 model ProjectRoom {
-  id       String @id @default(cuid())
-  projectId   String
-  userId   String
-  joinedAt DateTime @default(now())
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String
+  joinedAt  DateTime @default(now())
 
   vmState VmState @default(STOPPED)
 
-  user    User @relation(fields: [userId], references: [id])
-  project    Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  project Project @relation(fields: [projectId], references: [id])
 
-  @@unique([userId,projectId], name : "userId_projectId")
+  @@unique([userId, projectId], name: "userId_projectId")
   @@index([projectId])
   @@index([userId])
 }
 
 model ProjectEvent {
-  id String @id @default(cuid())
-  projectId String
-  ownerId String
-  eventType ProjectEventType
-  fromStatus ProjectLifecycleStatus?
-  toStatus ProjectLifecycleStatus?
-  message String?
-  instanceId String?
-  publicIp String?
+  id            String   @id @default(cuid())
+  projectId     String
+  ownerId       String
+  eventType     ProjectEventType
+  fromStatus    ProjectLifecycleStatus?
+  toStatus      ProjectLifecycleStatus?
+  message       String?
+  instanceId    String?
+  publicIp      String?
   containerName String?
-  metadata Json?
-  createdAt DateTime @default(now())
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
-  @@index([ projectId, createdAt])
-  @@index([projectId,eventType, createdAt])
+  @@index([projectId, createdAt])
+  @@index([projectId, eventType, createdAt])
   @@index([instanceId, createdAt])
 }
-
-// Project.ownerId - who controls lifecycle
-// ProjectRoom - who is allowed to collaborate/access

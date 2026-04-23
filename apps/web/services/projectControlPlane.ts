@@ -1,44 +1,58 @@
 import { Project, ProjectType } from "db/client";
 import { ensureProjectRuntime, RuntimeAssignment } from "./ec2Manager";
 import { prisma } from "db/client";
-import { withDistributedLock, controlPlaneLockKeys, CONTROL_PLANE_LOCK_TTL_MS, cleanupProjectRuntimeAssignment, cleanupProjectArtifacts, finalizeProjectDeletion } from "./redisManager";
-import { markProjectAllocating, markProjectDeletePendingReason, markProjectDeleting } from "./projectLifecycleManager";
+import {
+  withDistributedLock,
+  controlPlaneLockKeys,
+  CONTROL_PLANE_LOCK_TTL_MS,
+  cleanupProjectRuntimeAssignment,
+  cleanupProjectArtifacts,
+  finalizeProjectDeletion,
+} from "./redisManager";
+import {
+  markProjectAllocating,
+  markProjectDeletePendingReason,
+  markProjectDeleting,
+} from "./projectLifecycleManager";
 import { PROJECT_RUNTIME_LOCK_TTL_MS } from "../lib/control-plane/config";
 import { getProjectRuntimeSnapshot } from "./projectRuntimeTruthSource";
 import { createScopedLogger, logWarn } from "../lib/observability/structuredLogger";
 
-const withProjectRuntimeLock = async<T>(
-    projectId : string,
-    fn : () => Promise<T>,
-) : Promise< {lockAcquired : true ; value : T } | {lockAcquired : false }> => {
+const withProjectRuntimeLock = async <T>(
+  projectId: string,
+  fn: () => Promise<T>,
+): Promise<{ lockAcquired: true; value: T } | { lockAcquired: false }> => {
+  const result = await withDistributedLock(
+    controlPlaneLockKeys.runtime(projectId),
+    PROJECT_RUNTIME_LOCK_TTL_MS,
+    async () => {
+      const value = await fn();
+      return { value };
+    },
+  );
 
-    const result = await withDistributedLock(
-        controlPlaneLockKeys.runtime(projectId),
-        PROJECT_RUNTIME_LOCK_TTL_MS,
-        async () => {
-            const value = await fn();
-            return { value }
-        }
-    );
+  if (!result) {
+    return { lockAcquired: false };
+  }
 
-    if(!result){
-        return { lockAcquired : false };
-    }
+  return {
+    lockAcquired: true,
+    value: result.value,
+  };
+};
 
-    return {
-        lockAcquired : true,
-        value : result.value,
-    }
-}
+const normalizeProjectNameForDisplay = (name: string) =>
+  name.trim().replace(/\s+/g, " ");
 
-const normalizeProjectName = (name : string) => name.trim().replace(/\s+/g, " ");
+const normalizeProjectNameForKey = (name: string) =>
+  normalizeProjectNameForDisplay(name).toLowerCase();
 
 type ControlPlaneResponse = {
-    httpStatus : number,
-    message: string,
-    project : Project | null,
-    runtime : RuntimeAssignment | null,
-    inProgress : boolean,
+  httpStatus: number;
+  message: string;
+  project: Project | null;
+  runtime: RuntimeAssignment | null;
+  inProgress: boolean;
 };
 
 type CreateProjectLookupResult =
@@ -47,505 +61,505 @@ type CreateProjectLookupResult =
   | { kind: "conflict"; project: Project };
 
 const buildProjectSnapshot = async (
-    projectId : string) : Promise< { project : Project | null; runtime : RuntimeAssignment | null}> => {
-
-    const snapshot = await getProjectRuntimeSnapshot(projectId);
-    if(!snapshot.project){
-        return {
-            project : null,
-            runtime : null,
-        }
-    } 
-
-    if(!snapshot.runtime){
-        return {
-            project : snapshot.project,
-            runtime : null,
-        }
-    }
-
+  projectId: string,
+): Promise<{ project: Project | null; runtime: RuntimeAssignment | null }> => {
+  const snapshot = await getProjectRuntimeSnapshot(projectId);
+  if (!snapshot.project) {
     return {
-        project : snapshot.project,
-        runtime : {
-            userId : snapshot.runtime.userId,
-            instanceId: snapshot.runtime.instanceId,
-            publicIP: snapshot.runtime.publicIp,
-            projectId: snapshot.runtime.projectId,
-            projectName: snapshot.runtime.projectName,
-            projectType: snapshot.runtime.projectType,
-            containerName: snapshot.runtime.containerName ?? "",
-        }
-    }
+      project: null,
+      runtime: null,
+    };
+  }
+
+  if (!snapshot.runtime) {
+    return {
+      project: snapshot.project,
+      runtime: null,
+    };
+  }
+
+  return {
+    project: snapshot.project,
+    runtime: {
+      userId: snapshot.runtime.userId,
+      instanceId: snapshot.runtime.instanceId,
+      publicIP: snapshot.runtime.publicIp,
+      projectId: snapshot.runtime.projectId,
+      projectName: snapshot.runtime.projectName,
+      projectType: snapshot.runtime.projectType,
+      containerName: snapshot.runtime.containerName ?? "",
+    },
+  };
 };
 
 export const createOrResumeProject = async ({
-    ownerId,
-    name,
-    type,
+  ownerId,
+  name,
+  type,
 }: {
-    ownerId : string,
-    name : string,
-    type : ProjectType,
-}) : Promise<ControlPlaneResponse> => {
+  ownerId: string;
+  name: string;
+  type: ProjectType;
+}): Promise<ControlPlaneResponse> => {
+  const normalizedName = normalizeProjectNameForDisplay(name);
+  const normalizedNameKey = normalizeProjectNameForKey(name);
 
-    
+  const logger = createScopedLogger({
+    userId: ownerId,
+    meta: {
+      projectName: normalizedName,
+      normalizedName: normalizedNameKey,
+      projectType: type,
+    },
+  });
 
-    const normalizedName = normalizeProjectName(name);
-
-    const logger = createScopedLogger({
-        userId: ownerId,
-        meta: {
-            projectName: normalizedName,
-            projectType: type,
-        },
-    });
-
-    logger.info({
+  logger.info({
     operation: "project.control_plane.create_or_resume",
     status: "STARTED",
     reason: null,
-    });
+  });
 
-    const lockedResult = await withDistributedLock<ControlPlaneResponse>(
-        controlPlaneLockKeys.createProject(ownerId,normalizedName),
-        CONTROL_PLANE_LOCK_TTL_MS,
-        async () => {
-            const lookupResult = await prisma.$transaction<CreateProjectLookupResult>(
-            async (tx) => {
-                const existing = await tx.project.findFirst({
-                where: {
-                    ownerId,
-                    name: normalizedName,
-                    deletedAt: null,
-                },
-                });
+  const lockedResult = await withDistributedLock<ControlPlaneResponse>(
+    controlPlaneLockKeys.createProject(ownerId, normalizedNameKey),
+    CONTROL_PLANE_LOCK_TTL_MS,
+    async () => {
+      const lookupResult = await prisma.$transaction<CreateProjectLookupResult>(
+        async (tx) => {
+          const existing = await tx.project.findFirst({
+            where: {
+              ownerId,
+              normalizedName: normalizedNameKey,
+              deletedAt: null,
+            },
+          });
 
-                if (existing) {
-                if (existing.type !== type) {
-                    logger.warn({
-                    projectId: existing.id,
-                    operation: "project.name_type_conflict",
-                    status: "FAILED",
-                    reason:
-                        "Existing non-deleted project found for owner and normalized name, but with a different type",
-                    meta: {
-                        existingType: existing.type,
-                        requestedType: type,
-                    },
-                    });
-
-                    return {
-                    kind: "conflict",
-                    project: existing,
-                    };
-                }
-
-                logger.info({
-                    projectId: existing.id,
-                    operation: "project.existing.reused",
-                    status: "INFO",
-                    reason:
-                    "Existing non-deleted project found for owner, normalized name, and matching type",
-                    meta: {
-                    currentStatus: existing.status,
-                    },
-                });
-
-                return {
-                    kind: "existing",
-                    project: existing,
-                };
-                }
-
-                const now = new Date();
-
-                const created = await tx.project.create({
-                data: {
-                    name: normalizedName,
-                    type,
-                    ownerId,
-                    status: "CREATED",
-                    lastEventType: "PROJECT_CREATED",
-                    lastEventMessage: "Project created",
-                    lastEventAt: now,
-                },
-                });
-
-                await tx.projectRoom.create({
-                data: {
-                    userId: ownerId,
-                    projectId: created.id,
-                },
-                });
-
-                await tx.projectEvent.create({
-                data: {
-                    projectId: created.id,
-                    ownerId,
-                    eventType: "PROJECT_CREATED",
-                    fromStatus: "CREATED",
-                    toStatus: "CREATED",
-                    message: "Project created",
-                },
-                });
-
-                logger.info({
-                projectId: created.id,
-                operation: "project.db.created",
-                status: "SUCCESS",
-                reason: "Project row and initial project event created",
+          if (existing) {
+            if (existing.type !== type) {
+              logger.warn({
+                projectId: existing.id,
+                operation: "project.name_type_conflict",
+                status: "FAILED",
+                reason:
+                  "Existing non-deleted project found for owner and normalized name, but with a different type",
                 meta: {
-                    projectType: created.type,
+                  existingType: existing.type,
+                  requestedType: type,
                 },
-                });
+              });
 
-                return {
-                kind: "created",
-                project: created,
-                };
-            },
-            );
-
-            if (lookupResult.kind === "conflict") {
-            return {
-                httpStatus: 409,
-                message: `A project named "${normalizedName}" already exists for this user under type ${lookupResult.project.type}. Rename it or delete the existing project before creating a ${type} project.`,
-                project: lookupResult.project,
-                runtime: null,
-                inProgress: false,
-            };
+              return {
+                kind: "conflict",
+                project: existing,
+              };
             }
 
-            const project = lookupResult.project;
-            const createdByThisRequest = lookupResult.kind === "created";
-
-            if(project.status === "DELETING"){
-                const snapshot = await buildProjectSnapshot(project.id);
-
-                logger.warn({
-                    projectId: project.id,
-                    operation: "project.delete.already_in_progress",
-                    status: "SKIPPED",
-                    reason: "Project is already in DELETING state",
-                    meta: {
-                        currentStatus: project.status,
-                    },
-                });
-
-                return {
-                    httpStatus : 202,
-                    message : "Project deletion is already in progress",
-                    project : snapshot.project,
-                    runtime : snapshot.runtime,
-                    inProgress : true,
-                }
-            }
-
-            if(project.status === "READY"){
-                const snapshot = await buildProjectSnapshot(project.id);
-
-                return {
-                    httpStatus : createdByThisRequest ? 201 : 200,
-                    message : createdByThisRequest ? 
-                    "Project created and runtime already available"
-                    : "Project already exists and runtime is ready",
-                    project : snapshot.project,
-                    runtime : snapshot.runtime,
-                    inProgress : false,
-                }
-            }
-
-            if (
-                project.status === "BOOTING_CONTAINER" ||
-                project.status === "ALLOCATING_VM"
-            ) {
-                const snapshot = await buildProjectSnapshot(project.id);
-
-                return {
-                httpStatus: 202,
-                message: "Project runtime provisioning is already in progress",
-                project: snapshot.project,
-                runtime: snapshot.runtime,
-                inProgress: true,
-                };
-            }
-
-            if (
-                project.status === "CREATED" ||
-                project.status === "FAILED" ||
-                project.status === "STOPPED"
-            ) {
-                await markProjectAllocating(project.id);
-            }
-            
-
-            const runtimeResult = await withProjectRuntimeLock(project.id,() => 
-                ensureProjectRuntime(project.id, project.name, project.type , ownerId)
-            );
-
-            if(!runtimeResult.lockAcquired){
-                const snapshot = await buildProjectSnapshot(project.id);
-
-                logger.warn({
-                    projectId: project.id,
-                    operation: "project.runtime.lock_busy",
-                    status: "SKIPPED",
-                    reason: "Project runtime reconciliation already in progress",
-                    meta: {},
-                });
-
-                return {
-                    httpStatus : 202,
-                    message: "Project runtime reconciliation already in progress",
-                    project: snapshot.project,
-                    runtime: snapshot.runtime,
-                    inProgress: true,
-                }
-            };
-
-            const runtime = runtimeResult.value;
-            const snapshot = await buildProjectSnapshot(project.id);
-
-            if(!runtime){
-                const latestSnapshot = await buildProjectSnapshot(project.id);
-
-                if (latestSnapshot.project?.status === "FAILED") {
-                    return {
-                    httpStatus: 500,
-                    message:
-                        latestSnapshot.project.lastEventMessage ??
-                        "Project runtime failed to start",
-                    project: latestSnapshot.project,
-                    runtime: latestSnapshot.runtime,
-                    inProgress: false,
-                    };
-                }
-                return {
-                    httpStatus : 202,
-                    message : "Project exists but runtime provisioning",
-                    project : snapshot.project,
-                    runtime : snapshot.runtime,
-                    inProgress : true,
-                }
-            }
-
-            return {
-                httpStatus : createdByThisRequest ? 201 : 200,
-                message: createdByThisRequest
-                ? "Project created and runtime ready"
-                : "Project runtime reconciled successfully",
-                project: snapshot.project,
-                runtime,
-                inProgress: false,
-            }
-        }
-    );
-
-    if(!lockedResult){
-        logWarn({
-            userId: ownerId,
-            operation: "project.create.lock_busy",
-            status: "SKIPPED",
-            reason: "Another create request for this project is already in progress",
-            meta: {
-                projectName: normalizedName,
-                projectType: type,
-            },
-        });
-
-        return {
-            httpStatus : 409,
-            message: "Another create request for this project is already in progress",
-            project : null,
-            runtime : null,
-            inProgress : true,
-        }
-    }
-
-    return lockedResult;
-}
-
-const reconcileProjectDeletion = async ({
-    projectId,
-    ownerId,
-    projectName,
-    projectType,
-    logger,
-}: {
-    projectId: string;
-    ownerId: string;
-    projectName: string;
-    projectType: ProjectType;
-    logger: ReturnType<typeof createScopedLogger>;
-}): Promise<ControlPlaneResponse> => {
-    try {
-        const cleanupResult = await withProjectRuntimeLock(projectId, () =>
-            cleanupProjectRuntimeAssignment(projectId, ownerId),
-        );
-
-        if (!cleanupResult.lockAcquired) {
-            const snapshot = await buildProjectSnapshot(projectId);
-
-            logger.warn({
-                operation: "project.delete.runtime_lock_busy",
-                status: "SKIPPED",
-                reason: "Project runtime cleanup already in progress",
-                meta: {},
+            logger.info({
+              projectId: existing.id,
+              operation: "project.existing.reused",
+              status: "INFO",
+              reason:
+                "Existing non-deleted project found for owner, normalized name, and matching type",
+              meta: {
+                currentStatus: existing.status,
+              },
             });
 
             return {
-                httpStatus: 202,
-                message: "Project runtime cleanup already in progress",
-                project: snapshot.project,
-                runtime: snapshot.runtime,
-                inProgress: true,
+              kind: "existing",
+              project: existing,
             };
-        }
+          }
 
-        await cleanupProjectArtifacts({
-            projectId,
-            projectName,
-            projectType,
+          const now = new Date();
+
+          const created = await tx.project.create({
+            data: {
+              name: normalizedName,
+              normalizedName: normalizedNameKey,
+              type,
+              ownerId,
+              status: "CREATED",
+              lastEventType: "PROJECT_CREATED",
+              lastEventMessage: "Project created",
+              lastEventAt: now,
+            },
+          });
+
+          await tx.projectRoom.create({
+            data: {
+              userId: ownerId,
+              projectId: created.id,
+            },
+          });
+
+          await tx.projectEvent.create({
+            data: {
+              projectId: created.id,
+              ownerId,
+              eventType: "PROJECT_CREATED",
+              fromStatus: "CREATED",
+              toStatus: "CREATED",
+              message: "Project created",
+            },
+          });
+
+          logger.info({
+            projectId: created.id,
+            operation: "project.db.created",
+            status: "SUCCESS",
+            reason: "Project row and initial project event created",
+            meta: {
+              projectType: created.type,
+            },
+          });
+
+          return {
+            kind: "created",
+            project: created,
+          };
+        },
+      );
+
+      if (lookupResult.kind === "conflict") {
+        return {
+          httpStatus: 409,
+          message: `A project named "${normalizedName}" already exists for this user under type ${lookupResult.project.type}. Rename it or delete the existing project before creating a ${type} project.`,
+          project: lookupResult.project,
+          runtime: null,
+          inProgress: false,
+        };
+      }
+
+      const project = lookupResult.project;
+      const createdByThisRequest = lookupResult.kind === "created";
+
+      if (project.status === "DELETING") {
+        const snapshot = await buildProjectSnapshot(project.id);
+
+        logger.warn({
+          projectId: project.id,
+          operation: "project.delete.already_in_progress",
+          status: "SKIPPED",
+          reason: "Project is already in DELETING state",
+          meta: {
+            currentStatus: project.status,
+          },
         });
 
-        const finalized = await finalizeProjectDeletion(projectId, ownerId);
-        const snapshot = await buildProjectSnapshot(projectId);
+        return {
+          httpStatus: 202,
+          message: "Project deletion is already in progress",
+          project: snapshot.project,
+          runtime: snapshot.runtime,
+          inProgress: true,
+        };
+      }
 
-        if (!finalized) {
-            return {
-                httpStatus: 202,
-                message: "Delete accepted but cleanup is still reconciling",
-                project: snapshot.project,
-                runtime: snapshot.runtime,
-                inProgress: true,
-            };
-        }
+      if (project.status === "READY") {
+        const snapshot = await buildProjectSnapshot(project.id);
 
         return {
-            httpStatus: 200,
-            message: `Project ${projectId} deleted successfully`,
-            project: snapshot.project,
-            runtime: null,
+          httpStatus: createdByThisRequest ? 201 : 200,
+          message: createdByThisRequest
+            ? "Project created and runtime already available"
+            : "Project already exists and runtime is ready",
+          project: snapshot.project,
+          runtime: snapshot.runtime,
+          inProgress: false,
+        };
+      }
+
+      if (
+        project.status === "BOOTING_CONTAINER" ||
+        project.status === "ALLOCATING_VM"
+      ) {
+        const snapshot = await buildProjectSnapshot(project.id);
+
+        return {
+          httpStatus: 202,
+          message: "Project runtime provisioning is already in progress",
+          project: snapshot.project,
+          runtime: snapshot.runtime,
+          inProgress: true,
+        };
+      }
+
+      if (
+        project.status === "CREATED" ||
+        project.status === "FAILED" ||
+        project.status === "STOPPED"
+      ) {
+        await markProjectAllocating(project.id);
+      }
+
+      const runtimeResult = await withProjectRuntimeLock(project.id, () =>
+        ensureProjectRuntime(project.id, project.name, project.type, ownerId),
+      );
+
+      if (!runtimeResult.lockAcquired) {
+        const snapshot = await buildProjectSnapshot(project.id);
+
+        logger.warn({
+          projectId: project.id,
+          operation: "project.runtime.lock_busy",
+          status: "SKIPPED",
+          reason: "Project runtime reconciliation already in progress",
+          meta: {},
+        });
+
+        return {
+          httpStatus: 202,
+          message: "Project runtime reconciliation already in progress",
+          project: snapshot.project,
+          runtime: snapshot.runtime,
+          inProgress: true,
+        };
+      }
+
+      const runtime = runtimeResult.value;
+      const snapshot = await buildProjectSnapshot(project.id);
+
+      if (!runtime) {
+        const latestSnapshot = await buildProjectSnapshot(project.id);
+
+        if (latestSnapshot.project?.status === "FAILED") {
+          return {
+            httpStatus: 500,
+            message:
+              latestSnapshot.project.lastEventMessage ??
+              "Project runtime failed to start",
+            project: latestSnapshot.project,
+            runtime: latestSnapshot.runtime,
             inProgress: false,
-        };
-    } catch (err) {
-        await markProjectDeletePendingReason(
-            projectId,
-            err instanceof Error ? err.message : "Unknown delete error",
-        );
-
-        const snapshot = await buildProjectSnapshot(projectId);
-
+          };
+        }
         return {
-            httpStatus: 202,
-            message: "Delete accepted but cleanup is still reconciling",
-            project: snapshot.project,
-            runtime: snapshot.runtime,
-            inProgress: true,
+          httpStatus: 202,
+          message: "Project exists but runtime provisioning",
+          project: snapshot.project,
+          runtime: snapshot.runtime,
+          inProgress: true,
         };
-    }
+      }
+
+      return {
+        httpStatus: createdByThisRequest ? 201 : 200,
+        message: createdByThisRequest
+          ? "Project created and runtime ready"
+          : "Project runtime reconciled successfully",
+        project: snapshot.project,
+        runtime,
+        inProgress: false,
+      };
+    },
+  );
+
+  if (!lockedResult) {
+    logWarn({
+      userId: ownerId,
+      operation: "project.create.lock_busy",
+      status: "SKIPPED",
+      reason: "Another create request for this project is already in progress",
+      meta: {
+        projectName: normalizedName,
+        normalizedName: normalizedNameKey,
+        projectType: type,
+      },
+    });
+
+    return {
+      httpStatus: 409,
+      message: "Another create request for this project is already in progress",
+      project: null,
+      runtime: null,
+      inProgress: true,
+    };
+  }
+
+  return lockedResult;
 };
 
-export const deleteOrResumeProject = async({
-    projectId,
-    ownerId,
+const reconcileProjectDeletion = async ({
+  projectId,
+  ownerId,
+  projectName,
+  projectType,
+  logger,
 }: {
-    projectId : string,
-    ownerId : string
-}) : Promise<ControlPlaneResponse> => {
-    const logger = createScopedLogger({
-        projectId,
-        userId: ownerId,
-    });
+  projectId: string;
+  ownerId: string;
+  projectName: string;
+  projectType: ProjectType;
+  logger: ReturnType<typeof createScopedLogger>;
+}): Promise<ControlPlaneResponse> => {
+  try {
+    const cleanupResult = await withProjectRuntimeLock(projectId, () =>
+      cleanupProjectRuntimeAssignment(projectId, ownerId),
+    );
 
-    const lockedResult = await withDistributedLock<ControlPlaneResponse>(
-        controlPlaneLockKeys.deleteProject(projectId),
-        CONTROL_PLANE_LOCK_TTL_MS,
-        async () => {
-            const ownedProject = await prisma.project.findFirst({
-                where : {
-                    id : projectId,
-                    ownerId,
-                }
-            });
+    if (!cleanupResult.lockAcquired) {
+      const snapshot = await buildProjectSnapshot(projectId);
 
-            if(!ownedProject){
-                return {
-                    httpStatus : 403,
-                    message : "You do not have access to this project",
-                    project : null,
-                    runtime : null,
-                    inProgress : false,
-                }
-            }
+      logger.warn({
+        operation: "project.delete.runtime_lock_busy",
+        status: "SKIPPED",
+        reason: "Project runtime cleanup already in progress",
+        meta: {},
+      });
 
-            if(ownedProject.status === "DELETED"){
-                return {
-                    httpStatus: 200,
-                    message: "Project already deleted",
-                    project: ownedProject,
-                    runtime: null,
-                    inProgress: false,
-                };
-            }
-
-            if (ownedProject.status === "DELETING") {
-                logger.warn({
-                    operation: "project.delete.resume_requested",
-                    status: "INFO",
-                    reason: "Project is already DELETING; attempting to resume cleanup",
-                    meta: {
-                        currentStatus: ownedProject.status,
-                    },
-                });
-
-                return reconcileProjectDeletion({
-                    projectId,
-                    ownerId,
-                    projectName: ownedProject.name,
-                    projectType: ownedProject.type,
-                    logger,
-                });
-            }
-
-            await markProjectDeleting(projectId);
-            logger.info({
-                operation: "project.deletion.started",
-                status: "STARTED",
-                reason: "Project marked DELETING",
-                meta: {},
-            });
-
-            return reconcileProjectDeletion({
-                projectId,
-                ownerId,
-                projectName: ownedProject.name,
-                projectType: ownedProject.type,
-                logger,
-            });
-        }
-    )
-
-    if(!lockedResult){
-        const snapshot = await buildProjectSnapshot(projectId);
-
-        logWarn({
-            projectId,
-            userId: ownerId,
-            operation: "project.delete.lock_busy",
-            status: "SKIPPED",
-            reason: "Delete request already in progress",
-            meta: {},
-        });
-        
-        return {
-            httpStatus: 202,
-            message: "Delete request already in progress",
-            project: snapshot.project,
-            runtime: snapshot.runtime,
-            inProgress: true,
-        }
+      return {
+        httpStatus: 202,
+        message: "Project runtime cleanup already in progress",
+        project: snapshot.project,
+        runtime: snapshot.runtime,
+        inProgress: true,
+      };
     }
 
-    return lockedResult;
-}
+    await cleanupProjectArtifacts({
+      projectId,
+      projectName,
+      projectType,
+    });
+
+    const finalized = await finalizeProjectDeletion(projectId, ownerId);
+    const snapshot = await buildProjectSnapshot(projectId);
+
+    if (!finalized) {
+      return {
+        httpStatus: 202,
+        message: "Delete accepted but cleanup is still reconciling",
+        project: snapshot.project,
+        runtime: snapshot.runtime,
+        inProgress: true,
+      };
+    }
+
+    return {
+      httpStatus: 200,
+      message: `Project ${projectId} deleted successfully`,
+      project: snapshot.project,
+      runtime: null,
+      inProgress: false,
+    };
+  } catch (err) {
+    await markProjectDeletePendingReason(
+      projectId,
+      err instanceof Error ? err.message : "Unknown delete error",
+    );
+
+    const snapshot = await buildProjectSnapshot(projectId);
+
+    return {
+      httpStatus: 202,
+      message: "Delete accepted but cleanup is still reconciling",
+      project: snapshot.project,
+      runtime: snapshot.runtime,
+      inProgress: true,
+    };
+  }
+};
+
+export const deleteOrResumeProject = async ({
+  projectId,
+  ownerId,
+}: {
+  projectId: string;
+  ownerId: string;
+}): Promise<ControlPlaneResponse> => {
+  const logger = createScopedLogger({
+    projectId,
+    userId: ownerId,
+  });
+
+  const lockedResult = await withDistributedLock<ControlPlaneResponse>(
+    controlPlaneLockKeys.deleteProject(projectId),
+    CONTROL_PLANE_LOCK_TTL_MS,
+    async () => {
+      const ownedProject = await prisma.project.findFirst({
+        where: {
+          id: projectId,
+          ownerId,
+        },
+      });
+
+      if (!ownedProject) {
+        return {
+          httpStatus: 403,
+          message: "You do not have access to this project",
+          project: null,
+          runtime: null,
+          inProgress: false,
+        };
+      }
+
+      if (ownedProject.status === "DELETED") {
+        return {
+          httpStatus: 200,
+          message: "Project already deleted",
+          project: ownedProject,
+          runtime: null,
+          inProgress: false,
+        };
+      }
+
+      if (ownedProject.status === "DELETING") {
+        logger.warn({
+          operation: "project.delete.resume_requested",
+          status: "INFO",
+          reason: "Project is already DELETING; attempting to resume cleanup",
+          meta: {
+            currentStatus: ownedProject.status,
+          },
+        });
+
+        return reconcileProjectDeletion({
+          projectId,
+          ownerId,
+          projectName: ownedProject.name,
+          projectType: ownedProject.type,
+          logger,
+        });
+      }
+
+      await markProjectDeleting(projectId);
+      logger.info({
+        operation: "project.deletion.started",
+        status: "STARTED",
+        reason: "Project marked DELETING",
+        meta: {},
+      });
+
+      return reconcileProjectDeletion({
+        projectId,
+        ownerId,
+        projectName: ownedProject.name,
+        projectType: ownedProject.type,
+        logger,
+      });
+    },
+  );
+
+  if (!lockedResult) {
+    const snapshot = await buildProjectSnapshot(projectId);
+
+    logWarn({
+      projectId,
+      userId: ownerId,
+      operation: "project.delete.lock_busy",
+      status: "SKIPPED",
+      reason: "Delete request already in progress",
+      meta: {},
+    });
+
+    return {
+      httpStatus: 202,
+      message: "Delete request already in progress",
+      project: snapshot.project,
+      runtime: snapshot.runtime,
+      inProgress: true,
+    };
+  }
+
+  return lockedResult;
+};
