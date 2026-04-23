@@ -1,0 +1,98 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spinup-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: spinup_local
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - spinup-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d spinup_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: spinup-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - spinup-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: spinup-web:local
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    container_name: spinup-migrate
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/spinup_local
+      REDIS_URL: redis://redis:6379
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "cd /app/packages/db &&
+             npx prisma migrate deploy --schema=prisma/schema.prisma &&
+             npx prisma generate --schema=prisma/schema.prisma"
+    restart: "no"
+
+  web:
+    image: spinup-web:local
+    container_name: spinup-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/spinup_local
+      REDIS_URL: redis://redis:6379
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+
+  control-plane-worker:
+    image: spinup-web:local
+    container_name: spinup-control-plane-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/spinup_local
+      REDIS_URL: redis://redis:6379
+      NEXT_TELEMETRY_DISABLED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["npm", "run", "control-plane:worker"]
+
+volumes:
+  spinup-postgres-data:
+  spinup-redis-data:
