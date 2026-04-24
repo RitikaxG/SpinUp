@@ -1,81 +1,93 @@
 # SpinUp
 
-SpinUp is a control-plane-first developer runtime platform for launching project workspaces on reusable EC2 VMs.
+SpinUp is a control-plane-first developer runtime platform. It creates project workspaces by allocating reusable EC2 VMs from an Auto Scaling Group, starting a project-specific code-server container on the VM, and exposing the workspace in the browser.
 
-## What v1 does
+## What SpinUp does
 
-- create a project from the control plane
-- allocate an idle VM from an autoscaled warm pool
-- boot a deterministic container for the project
-- expose a ready workspace runtime
-- stop/delete project runtimes safely
-- recover failed runtimes through a control-plane worker
-- rehydrate runtime state from DB when Redis mappings are missing
+- creates or resumes a project from the backend control plane
+- finds an idle VM from the ASG warm pool
+- scales up the ASG when idle capacity is low
+- starts a deterministic Docker container for the project
+- exposes code-server on port `8080`
+- tracks runtime state in Postgres and Redis
+- cleans up or recovers failed runtimes through a worker
 
-## Core v1 constraints
+## Main components
 
-### 1. One active runtime per user
-SpinUp v1 allows only one active project runtime per user.
+| Path | Purpose |
+|---|---|
+| `apps/web` | Main control plane: APIs, lifecycle, VM allocation, ASG logic, Redis locks, cleanup, heartbeat |
+| `apps/vm-base-config` | code-server workspace image: S3 project bootstrap, file sync, CodeTogether, code-server startup |
+| `packages/db` | Prisma schema and generated DB client |
+| `docs` | Architecture, autoscaling, control-plane, testing, and local setup notes |
 
-If a user starts another project while one is already active, the previous project runtime is cleaned up and the new project takes over the available VM capacity.
+External VM agent repo:
 
-### 2. Project name uniqueness
-Project names are unique per user regardless of project type.
+```text
+https://github.com/RitikaxG/vm-coderserver-start-script
+```
 
-That means a user cannot create:
+That agent runs on every EC2 VM and exposes Docker control endpoints on port `3000`.
 
-- `My App` as `NEXTJS`
-- `My App` as `REACT`
+## Runtime flow
 
-at the same time.
+```text
+POST /api/project
+  → create/resume project
+  → mark ALLOCATING_VM
+  → find idle VM or scale ASG
+  → wait for public IP
+  → wait for VM agent on port 3000
+  → mark BOOTING_CONTAINER
+  → start spinup-<projectId> container
+  → wait for container/workspace readiness
+  → mark READY
+  → open workspace on port 8080
+```
 
-If a project with the same normalized name already exists under a different type, the API returns `409`.
+## Core constraints
 
-### 3. Create requests can be long-running
-Project creation may wait for an idle VM to appear. In the current v1 implementation, the control plane can wait for up to ~180 seconds before failing the request.
+### One active runtime per user
 
-This means the control plane should run on a persistent Node/container deployment rather than a short-timeout serverless environment.
+SpinUp v1 allows one active runtime per user. If a user starts another project, the previous project runtime is cleaned up first.
 
-## High-level runtime flow
+### Project name uniqueness
 
-1. `POST /api/project`
-2. create or resume project row
-3. if another project for the same user is active, stop it
-4. allocate idle VM or wait for warm-pool capacity
-5. wait for public IP
-6. wait for VM agent health
-7. mark project as `BOOTING_CONTAINER`
-8. start the deterministic project container
-9. wait until runtime becomes ready
-10. mark project as `READY`
-11. mirror runtime assignment into Redis
+Project names are unique per user. If the same normalized name already exists with a different project type, the API returns `409`.
 
-## Delete/recovery flow
+### Long-running create requests
 
-Delete:
+Project creation may wait for ASG capacity. The current backend can wait for roughly 180 seconds before marking the project failed, so the control plane should run as a persistent service.
 
-1. mark project as `DELETING`
-2. clean up runtime assignment
-3. clean up project artifacts
-4. finalize to `DELETED`
+## Important commands
 
-Recovery:
-
-1. control-plane worker scans active assignments
-2. failed health checks increment heartbeat failures
-3. hard failures or threshold breaches trigger runtime cleanup
-4. project is marked `FAILED`
-5. user can retry project start
-
-## Control-plane worker
-
-The worker is required for:
-
-- heartbeat reconciliation
-- failed runtime recovery
-- warm-pool reconciliation
-
-Run it with:
+From repo root:
 
 ```bash
+bun install
+bun run dev
+bun run check-types
+bun run test:web
 bun run control-plane:worker
+```
+
+## Key docs
+
+```text
+docs/autoscaling_asg_runtime.md
+docs/control_plane_logic.md
+docs/testing/web-tests.md
+docs/project_docker_startup_guide.md
+```
+
+## Summary
+
+SpinUp separates runtime responsibility clearly:
+
+```text
+Postgres = project lifecycle truth
+Redis = locks and fast runtime mirror
+ASG = VM capacity
+VM agent = Docker control on each VM
+vm-base-config = project-aware code-server workspace
+```

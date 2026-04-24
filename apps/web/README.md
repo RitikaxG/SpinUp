@@ -1,92 +1,112 @@
-# SpinUp Web App
+# SpinUp Web
 
-This package contains the SpinUp control plane, API routes, runtime orchestration logic, and the background worker used for reconciliation.
+`apps/web` is the SpinUp control plane.
 
-## What lives here
+It owns the backend logic that creates projects, allocates VMs, starts workspaces, handles cleanup, and reconciles failed runtimes.
 
-- `app/api/project/route.ts` — create and delete project endpoints
-- `services/projectControlPlane.ts` — create/delete orchestration
-- `services/ec2Manager.ts` — VM allocation and runtime boot flow
-- `services/redisManager.ts` — Redis lifecycle mirrors, distributed locks, and cleanup helpers
-- `services/runtimeHeartbeatManager.ts` — runtime health checks and recovery flow
-- `services/asgManager.ts` — warm-pool and autoscaling decisions
-- `services/controlPlaneReconciler.ts` — worker tick entry point
-- `scripts/control-plane-worker.ts` — long-running reconciliation worker
+## What this app handles
 
-## Current v1 behavior
+- project create/delete APIs
+- project lifecycle transitions
+- VM allocation from the ASG
+- autoscaling decisions
+- Redis distributed locks
+- one active runtime per user
+- VM agent calls
+- container boot readiness
+- heartbeat checks
+- runtime recovery
+- project cleanup
 
-### One active runtime per user
-SpinUp v1 supports one active runtime per user.
+## Important files
 
-If a user starts another project while one runtime is already active, the currently active runtime is cleaned up and the new project takes over the available capacity.
+| File | Purpose |
+|---|---|
+| `app/api/project/route.ts` | API entrypoint for create/delete/list |
+| `services/projectControlPlane.ts` | create/resume/delete orchestration |
+| `services/ec2Manager.ts` | VM allocation and runtime boot |
+| `services/asgManager.ts` | ASG idle-pool and scaling logic |
+| `services/redisManager.ts` | locks, runtime mirror, cleanup helpers |
+| `services/projectLifecycleManager.ts` | valid lifecycle transitions and events |
+| `services/runtimeHeartbeatManager.ts` | runtime health checks and recovery |
+| `services/controlPlaneReconciler.ts` | worker tick: heartbeat + warm-pool reconcile |
+| `lib/vmAgent/client.ts` | HTTP client for the VM agent |
 
-### Project naming rule
-Project names are unique per user regardless of type.
+## Project lifecycle
 
-That means the same user cannot create both:
-
-- `My App` as `NEXTJS`
-- `My App` as `REACT`
-
-at the same time.
-
-If the normalized project name already exists under a different type, the API returns `409`.
-
-### Long-running create requests
-Project creation may wait for an idle VM from the warm pool. In the current v1 flow, the control plane can wait for up to roughly 180 seconds before failing the request.
-
-This package should therefore run on a persistent Node/container deployment rather than a short-timeout serverless path.
-
-## Local commands
-
-Start the app:
-
-```bash
-bun run dev
+```text
+CREATED
+  → ALLOCATING_VM
+  → BOOTING_CONTAINER
+  → READY
 ```
 
-Typecheck:
+Failure/cleanup states:
 
-```bash
-bun run check-types
+```text
+STOPPED
+FAILED
+DELETING
+DELETED
 ```
 
-Run tests:
+## Runtime flow
 
-```bash
-bun run test
+```text
+POST /api/project
+  → create/resume project
+  → acquire create/runtime locks
+  → clean previous runtime for same user if needed
+  → allocate idle VM or scale ASG
+  → wait for VM public IP
+  → wait for VM agent health on port 3000
+  → mark BOOTING_CONTAINER
+  → call VM agent /start
+  → wait for container/workspace readiness
+  → mark READY
 ```
 
-Run coverage:
+## Safety rules
 
-```bash
-bun run test:coverage
+- Postgres is the source of truth.
+- Redis is used for locks and fast runtime lookup.
+- A project runtime is guarded by `lock:project:runtime:<projectId>`.
+- ASG scale-up is guarded by `lock:asg:scale-up`.
+- A VM is reused only if it is healthy, idle, has a public IP, and the VM agent responds.
+- If a project is deleted while booting, provisioning is cancelled and the VM is cleaned up.
+
+## Worker
+
+The control-plane worker runs:
+
+```text
+heartbeat reconciliation
+warm-pool reconciliation
 ```
 
-Run the control-plane worker:
+Run it with:
 
 ```bash
 bun run control-plane:worker
 ```
 
-## Test strategy
+Heartbeat detects bad runtimes. Warm-pool reconciliation handles unhealthy instances, idle timeout, and scaling.
 
-The test suite here is intentionally designed to pass in CI without real AWS infrastructure.
+## Local commands
 
-CI covers:
+```bash
+bun run dev
+bun run check-types
+bun run test
+bun run test:coverage
+```
 
-- schema validation
-- route response contracts
-- control-plane branching
-- cleanup logic
-- heartbeat recovery logic
-- autoscaling decision logic
+From repo root, web tests are run with:
 
-Manual validation still matters for:
+```bash
+bun run test:web
+```
 
-- real AWS VM allocation
-- VM agent reachability
-- real container boot behavior
-- Redis flush/rehydration smoke checks
-- worker deployment
-- full end-to-end lifecycle validation
+## Summary
+
+`apps/web` is the backend brain of SpinUp. It does not run the workspace itself; it coordinates Postgres, Redis, AWS ASG, EC2, and the VM agent so project runtimes can be allocated, started, monitored, and cleaned up safely.

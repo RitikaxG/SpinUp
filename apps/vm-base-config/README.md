@@ -1,95 +1,209 @@
 # vm-base-config
 
-## Overview
-`vm-base-config` is the project-aware workspace image and bootstrap layer for SpinUp. It is built on top of `lscr.io/linuxserver/code-server:latest`, installs Node.js 22 and Bun, copies my setup scripts into `/app`, and starts everything through `/app/entrypoint.sh`. The container exposes port 8080 and launches code-server from inside the container. 
+`vm-base-config` is the workspace image/bootstrap layer for SpinUp.
 
-## Why this package exists
-A plain code-server image only gives a browser IDE. SpinUp needs much more than that:
-- seed a fresh workspace from a reusable base app,
-- persist project files across restarts,
-- sync changes back to object storage,
-- enable collaboration tooling,
-- and make startup deterministic for every project type.
+It is the Docker image that actually runs the user's code-server workspace on an EC2 VM.
 
-`vm-base-config` is the layer that turns a generic code-server container into a **SpinUp workspace runtime**.
+The SpinUp backend does not directly run code-server. The backend asks the VM agent to start a Docker container, and that container is built from this package.
 
-## What it provides
+```text
+SpinUp backend
+  → VM agent starts Docker container
+  → vm-base-config bootstraps project files
+  → code-server runs on port 8080
+```
 
-### 1. Base app bootstrapping from S3
-`vmBaseSetup.ts` builds two key prefixes:
-- source: `base-app/${projectType}-base-app`
-- destination: `projects/${projectName}_${projectId}/code-${projectType}`
+---
 
-If the destination already exists in S3, it pulls the existing project into the VM. Otherwise it:
-1. ensures the base app is uploaded,
-2. copies the project-type base app inside the bucket,
-3. fetches that copied project into the VM. 
+## Why this app exists
 
-### 2. Pre-upload of the base app
-`upload-base-app-to-s3.ts` recursively walks the local folder, skips heavy/unwanted paths such as `node_modules`, `.next`, `dist`, `build`, `.env`, `.git`, and `.DS_Store`, ensures the bucket exists, and uploads files with MIME types preserved. The bucket name is currently hardcoded as `bolt-app-v2`. 
+A plain code-server image only gives a browser IDE.
 
-### 3. Copy-on-create project provisioning
-`fetch-base-app-from-s3.ts` supports listing objects, copying objects within the same S3 bucket, and fetching objects back down to the VM filesystem. `copyS3Folder(...)` is what turns a reusable base-app prefix into a project-specific prefix like `projects/${projectName}_${projectId}/code-${projectType}`. 
+SpinUp needs the workspace container to also:
 
-### 4. Pulling project files into the VM
-`storeFilesInVM(...)` downloads each object under the project prefix and writes it into the container filesystem, preserving directory structure under `/app/projects/...`. That is what makes a project visible to code-server as real files on disk.
+- know which project it belongs to,
+- restore existing project files from S3,
+- create a new project from a base app if needed,
+- install dependencies,
+- sync file changes back to S3,
+- install collaboration tooling,
+- start code-server in the correct project folder.
 
-### 5. Periodic / event-driven sync back to S3
-`startProjectSync.ts` watches `/app/projects/${projectName}_${projectId}/code-${projectType}` with `chokidar`, debounces rapid file changes by 3 seconds, uploads the changed project tree back to S3, writes a `sync.log`, and performs a final sync on shutdown signals such as `SIGINT` and `SIGTERM`.
+`vm-base-config` adds that project-aware startup behavior.
 
-### 6. CodeTogether support
-`entrypoint.sh` installs the CodeTogether extension from `/app/extensions/codetogether.vsix` before launching code-server. 
+---
 
-### 7. Default code-server theme
-`entrypoint.sh` writes user settings under `/config/.local/share/code-server/User/settings.json` and sets the default theme to `Default Dark+`. 
+## What this app does
 
-### 8. Containerized startup on port 8080
-The entrypoint runs this sequence:
-1. `bun scripts/vmBaseSetup.ts`
-2. `bun install` inside the project directory
-3. install CodeTogether extension
-4. launch background sync watcher
-5. set the default theme
-6. exec code-server on `0.0.0.0:8080` with `--auth none`
+When the container starts, it receives:
 
-## File map
-- `docker/Dockerfile.codeserver`: builds the workspace image.
-- `entrypoint.sh`: orchestrates container startup. 
-- `scripts/vmBaseSetup.ts`: decides whether to reuse an existing project, upload the base app, copy it in S3, and fetch it locally. 
-- `scripts/upload-base-app-to-s3.ts`: uploads a local folder tree to S3. 
-- `scripts/fetch-base-app-from-s3.ts`: list/get/copy/fetch helpers for S3. 
-- `scripts/startProjectSync.ts`: background watcher and final sync on shutdown. 
+```env
+PROJECT_ID=<projectId>
+PROJECT_NAME=<projectName>
+PROJECT_TYPE=<projectType>
+```
 
-## Local testing vs EC2/ASG runtime
+Then it runs this flow:
 
-### Local Docker testing: why credentials are required
-When we run this image locally on our laptop, the container is **not** running on an EC2 instance with an attached instance profile. The AWS SDK for JavaScript v3 therefore cannot pull credentials from EC2 metadata. Because the S3 clients in this repo are currently initialized with only `region` and their explicit credential block is commented out, the SDK falls back to the default Node.js credential provider chain. That means local runs need credentials from environment variables, shared AWS config files, or another standard provider. 
+```text
+1. Build the project S3 prefix
+2. Check whether this project already exists in S3
+3. If it exists, download existing files into the container
+4. If it does not exist, copy the base app to a project-specific S3 path
+5. Download the project files into /app/projects/...
+6. Run bun install inside the project
+7. Install CodeTogether extension
+8. Start file sync watcher
+9. Start code-server on 0.0.0.0:8080
+```
 
-In practice, local validation uses an IAM user (or equivalent local principal) with enough rights to:
-- provision AWS resources if local orchestration code creates EC2 / launch templates / ASGs,
-- and access S3 if the container is going to execute `vmBaseSetup` locally.
+---
 
-If we choose to test by uncommenting explicit credentials inside the S3 clients, the container will also work with our custom env names. But the production-friendly version is to rely on the standard credential chain and pass standard `AWS_*` vars locally. 
+## S3 layout
 
-### EC2 / ASG runtime: why hardcoded credentials are not required
-In the EC2 path, the launch template attaches an **instance profile** to the VM. An instance profile is the IAM mechanism used to pass an IAM role to an EC2 instance, and applications on that instance can retrieve temporary credentials through the Instance Metadata Service. For Auto Scaling groups, AWS explicitly expects the role to be associated through the launch template / instance profile. That is why our production image can remove hardcoded AWS keys and still access S3 when it runs on EC2. 
+The container uses two S3 paths.
 
-## IAM model for this package
+### Base app path
 
-### Local provisioning user
-A laptop-side user may need:
-- EC2 permissions,
-- Auto Scaling permissions,
-- S3 permissions for local container testing,
-- and `iam:PassRole` if it creates or updates launch templates / ASGs that reference an instance profile. AWS documents that launching instances from a launch template containing an instance profile requires `iam:PassRole`. 
+```text
+base-app/<projectType>-base-app
+```
 
-### Runtime EC2 role
-The VM’s **runtime** identity should be the EC2 role attached through the launch template. That role needs the S3 permissions required by `vm-base-config` for our bucket and prefixes. The role is what the container should use in AWS; the IAM user should not be “attached” to the EC2 instance. 
+Example:
 
-## Important operational caveats
-- The bucket name is currently hardcoded in both S3 scripts as `bolt-app-v2`; if the bucket changes, rebuild the image after updating both files. 
-- `uploadFilesToS3(...)` uploads current files, but the current implementation does not issue S3 deletes for removed files, so `unlink` events do not remove old objects from S3. 
-- `ensureBucketExits(...)` logs a generic error for non-404 `HeadBucket` failures instead of surfacing the original exception; improving that will make future debugging easier.
+```text
+base-app/nextjs-base-app
+```
+
+### Project path
+
+```text
+projects/<projectName>_<projectId>/code-<projectType>
+```
+
+Example:
+
+```text
+projects/my-app_project_123/code-nextjs
+```
+
+If the project path already exists, the container treats it as an existing project and restores it.
+
+If it does not exist, the container copies the base app into that project path first.
+
+---
+
+## File sync
+
+After code-server starts, `startProjectSync.ts` watches the project directory:
+
+```text
+/app/projects/<projectName>_<projectId>/code-<projectType>
+```
+
+When files change, it syncs the project back to S3.
+
+This is what makes project files survive container/VM restarts.
+
+---
+
+## Important files
+
+| File | Purpose |
+|---|---|
+| `docker/Dockerfile.codeserver` | Builds the `my-code-server` image |
+| `entrypoint.sh` | Main container startup script |
+| `scripts/vmBaseSetup.ts` | Decides whether to restore existing project or create from base app |
+| `scripts/fetch-base-app-from-s3.ts` | Lists, copies, and downloads S3 files |
+| `scripts/upload-base-app-to-s3.ts` | Uploads base app files to S3 |
+| `scripts/startProjectSync.ts` | Watches local project files and syncs them back to S3 |
+
+---
+
+## Container startup
+
+`entrypoint.sh` is the main runtime entrypoint.
+
+It does:
+
+```text
+bun scripts/vmBaseSetup.ts
+cd /app/projects/<projectName>_<projectId>/code-<projectType>
+bun install
+install CodeTogether extension
+start sync watcher
+write code-server settings
+start code-server on port 8080
+```
+
+The final workspace is opened at:
+
+```text
+http://<EC2_PUBLIC_IP>:8080
+```
+
+---
+
+## Build and push image
+
+From this package:
+
+```bash
+docker build -t my-code-server -f docker/Dockerfile.codeserver .
+docker tag my-code-server ritikaxg/my-code-server:latest
+docker push ritikaxg/my-code-server:latest
+```
+
+On the AMI VM, pull and tag it as:
+
+```bash
+docker pull ritikaxg/my-code-server:latest
+docker tag ritikaxg/my-code-server:latest my-code-server
+```
+
+The VM agent expects the local image name:
+
+```text
+my-code-server
+```
+
+---
+
+## AWS credentials
+
+This package uses S3.
+
+For local Docker testing, credentials must come from your local AWS environment.
+
+For EC2/ASG runtime, credentials should come from the IAM role attached to the EC2 instance through the launch template.
+
+Do not bake AWS access keys into the image.
+
+---
+
+## Current code note
+
+The current S3 helper scripts hardcode the bucket name as:
+
+```text
+bolt-app-v1
+```
+
+If you move to a new bucket, update the scripts or move the bucket name to an environment variable, then rebuild and push the image.
+
+---
 
 ## Summary
-`vm-base-config` is the **workspace bootstrap and persistence layer** of SpinUp. It seeds project files from S3, restores existing projects, keeps the VM copy in sync with object storage, installs collaboration tooling, configures code-server, and serves the developer workspace on port 8080.
+
+`vm-base-config` is responsible for turning a blank code-server container into a real SpinUp workspace.
+
+It handles:
+
+```text
+S3 project restore
+base-app copy
+dependency install
+file sync
+CodeTogether setup
+code-server startup on 8080
+```
