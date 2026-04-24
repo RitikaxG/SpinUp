@@ -17,6 +17,10 @@ User creates project
 
 ---
 
+## Project Lifecycle
+
+![Control Plane Lifecycle](./images/control_plane_lifecycle.png)
+
 ## 1. Mental model
 
 SpinUp has three layers:
@@ -930,6 +934,10 @@ project FAILED
 
 ---
 
+## Delete and Cleanup Flow
+
+![Delete and Cleanup Flow](./images/delete_cleanup_flow.png)
+
 ### 26.6 Project deleted while booting
 
 The boot flow repeatedly checks whether deletion was requested.
@@ -1132,6 +1140,10 @@ Active runtimes are projects with:
 status in ALLOCATING_VM, BOOTING_CONTAINER, READY
 assignedInstanceId != null
 ```
+
+## Heartbeat and Recovery
+
+![Heartbeat and Recovery Flow](./images/heartbeat_recovery_flow.png)
 
 Heartbeat checks:
 

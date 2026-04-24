@@ -4,6 +4,10 @@
 
 It owns the backend logic that creates projects, allocates VMs, starts workspaces, handles cleanup, and reconciles failed runtimes.
 
+## Project Runtime Flow
+
+![Project Runtime Flow](../../docs/images/project_runtime_flow.png)
+
 ## What this app handles
 
 - project create/delete APIs

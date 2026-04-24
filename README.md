@@ -12,6 +12,10 @@ SpinUp is a control-plane-first developer runtime platform. It creates project w
 - tracks runtime state in Postgres and Redis
 - cleans up or recovers failed runtimes through a worker
 
+## System Architecture
+
+![SpinUp System Architecture](./docs/images/system_architecture.png)
+
 ## Main components
 
 | Path | Purpose |

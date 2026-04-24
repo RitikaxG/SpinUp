@@ -15,6 +15,10 @@ SpinUp backend
 
 ---
 
+## Startup Flow
+
+![vm-base-config Startup Flow](../../docs/images/vm_base_config_startup_flow.png)
+
 ## Why this app exists
 
 A plain code-server image only gives a browser IDE.

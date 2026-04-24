@@ -6,6 +6,10 @@ SpinUp does not create a fresh EC2 instance directly for every project. Instead,
 
 ---
 
+## ASG Scaling Flow
+
+![ASG Scaling Flow](./images/asg_autoscaling_flow.png)
+
 ## 1. High-level architecture
 
 ```text
