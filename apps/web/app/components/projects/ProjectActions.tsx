@@ -1,7 +1,7 @@
 "use client";
 
 import type { Project } from "../../types/project";
-import { getIdeUrl, getPreviewUrl } from "../../lib/projectUrls";
+import { getIdeUrl } from "../../lib/projectUrls";
 
 type ProjectActionsProps = {
   project: Project;
@@ -15,7 +15,7 @@ export function ProjectActions({
   onStart,
 }: ProjectActionsProps) {
   const ideUrl = getIdeUrl(project);
-  const previewUrl = getPreviewUrl(project);
+  
 
   if (project.status === "READY") {
     return (
@@ -45,24 +45,7 @@ export function ProjectActions({
             </button>
           )}
 
-          {previewUrl ? (
-            <a
-              href={previewUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="rounded-lg border border-white/10 px-4 py-2 text-sm text-zinc-200 transition hover:bg-white/10"
-            >
-              Open preview in new tab
-            </a>
-          ) : (
-            <button
-              type="button"
-              disabled
-              className="rounded-lg border border-white/10 px-4 py-2 text-sm text-zinc-500 opacity-60"
-            >
-              Preview not supported
-            </button>
-          )}
+        
         </div>
       </section>
     );
