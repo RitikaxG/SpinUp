@@ -1,0 +1,124 @@
+import { useCallback, useEffect, useState } from "react";
+
+import { fetchProjectById } from "../lib/projectApi";
+import useProjectStore from "../store/projectStore";
+import type { Project, ProjectStatus } from "../types/project";
+
+const POLLING_STATUSES = new Set<ProjectStatus>([
+  "ALLOCATING_VM",
+  "BOOTING_CONTAINER",
+  "DELETING",
+]);
+
+const POLL_INTERVAL_MS = 3000;
+
+export function useProjectPolling(projectId: string | null) {
+  const projectFromStore = useProjectStore((state) =>
+    projectId
+      ? state.projects.find((project) => project.id === projectId)
+      : undefined,
+  );
+
+  const upsertProject = useProjectStore((state) => state.upsertProject);
+
+  const [project, setProject] = useState<Project | null>(
+    projectFromStore ?? null,
+  );
+  const [isLoading, setIsLoading] = useState(!projectFromStore);
+  const [error, setError] = useState<string | null>(null);
+
+  const refetch = useCallback(async () => {
+    if (!projectId) return null;
+
+    const nextProject = await fetchProjectById(projectId);
+
+    setProject(nextProject);
+    upsertProject(nextProject);
+    setError(null);
+
+    return nextProject;
+  }, [projectId, upsertProject]);
+
+  useEffect(() => {
+    if (projectFromStore) {
+      setProject(projectFromStore);
+    }
+  }, [projectFromStore]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setIsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    let latestStatus: ProjectStatus | null = null;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const fetchOnce = async (showLoading: boolean) => {
+      try {
+        if (showLoading) {
+          setIsLoading(true);
+        }
+
+        const nextProject = await fetchProjectById(projectId);
+
+        if (cancelled) return;
+
+        latestStatus = nextProject.status;
+        setProject(nextProject);
+        upsertProject(nextProject);
+        setError(null);
+
+        if (
+          intervalId &&
+          latestStatus &&
+          !POLLING_STATUSES.has(latestStatus)
+        ) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+      } catch (err) {
+        if (cancelled) return;
+
+        const message =
+          err instanceof Error ? err.message : "Failed to fetch project";
+        setError(message);
+      } finally {
+        if (!cancelled && showLoading) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void fetchOnce(true);
+
+    intervalId = setInterval(() => {
+      if (latestStatus && !POLLING_STATUSES.has(latestStatus)) {
+        if (intervalId) {
+          clearInterval(intervalId);
+          intervalId = null;
+        }
+
+        return;
+      }
+
+      void fetchOnce(false);
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [projectId, upsertProject]);
+
+  return {
+    project,
+    isLoading,
+    error,
+    refetch,
+  };
+}

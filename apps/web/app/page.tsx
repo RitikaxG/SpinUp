@@ -54,7 +54,7 @@ export default function LandingPage(){
       }
 
       upsertProject(project);
-      router.push("/projects");
+      router.push(`/projects/${project.id}`);
     }
     catch(err){
       console.error(`Error creating new project ${err}`);

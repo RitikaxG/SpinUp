@@ -22,6 +22,10 @@ export type Project = {
   publicIp?: string | null;
   containerName?: string | null;
 
+  bootStartedAt?: string | null;
+  bootCompletedAt?: string | null;
+  lastHeartbeatAt?: string | null;
+
   lastEventType?: string | null;
   lastEventMessage?: string | null;
   lastEventAt?: string | null;

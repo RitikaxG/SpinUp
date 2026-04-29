@@ -9,6 +9,11 @@ type ProjectListResponse = {
   allProjects: Project[];
 };
 
+type ProjectResponse = {
+  message: string;
+  project: Project | null;
+};
+
 const parseJson = async <T>(response: Response): Promise<T> => {
   const data = await response.json().catch(() => null);
 
@@ -34,6 +39,26 @@ export const fetchProjects = async (): Promise<Project[]> => {
   return data.allProjects ?? [];
 };
 
+export const fetchProjectById = async (
+  projectId: string,
+): Promise<Project> => {
+  const response = await fetch(
+    `/api/project/${encodeURIComponent(projectId)}`,
+    {
+      method: "GET",
+      cache: "no-store",
+    },
+  );
+
+  const data = await parseJson<ProjectResponse>(response);
+
+  if (!data.project) {
+    throw new Error("Project not found");
+  }
+
+  return data.project;
+};
+
 export const createOrResumeProject = async (
   input: CreateProjectInput,
 ): Promise<ProjectApiResponse> => {
@@ -51,9 +76,12 @@ export const createOrResumeProject = async (
 export const deleteProjectById = async (
   projectId: string,
 ): Promise<ProjectApiResponse> => {
-  const response = await fetch(`/api/project?id=${encodeURIComponent(projectId)}`, {
-    method: "DELETE",
-  });
+  const response = await fetch(
+    `/api/project?id=${encodeURIComponent(projectId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 
   return parseJson<ProjectApiResponse>(response);
 };
