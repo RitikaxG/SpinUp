@@ -12,8 +12,6 @@ SpinUp is not just a frontend clone. The main focus is the backend/runtime syste
 
 👉 [SpinUp Demo (X)](https://x.com/RitikaxG/status/2049480224946164164?s=20)
 
-Short walkthrough of the full lifecycle:
-create project → allocate VM → boot container → open workspace.
 ---
 
 ## What SpinUp does
