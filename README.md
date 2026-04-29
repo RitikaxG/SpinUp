@@ -80,7 +80,7 @@ bun run control-plane:worker
 ```text
 docs/autoscaling_asg_runtime.md
 docs/control_plane_logic.md
-docs/testing/web-tests.md
+docs/testing/control-plane-validation.md
 docs/project_docker_startup_guide.md
 ```
 

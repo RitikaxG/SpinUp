@@ -1,44 +1,56 @@
 import { create } from "zustand";
 import { devtools } from "zustand/middleware";
-import { StateCreator } from "zustand";
-
-interface Project {
-    id : string,
-    name : string,
-    type : string
-}
+import type { Project } from "../types/project";
 
 interface ProjectState {
-    projects : Project[],
-    addProject : (project : Project) => void,
-    removeProject : (projectId : string) => void,
-    setProjects : (projects : Project[]) => void,
-    clearProjects : () => void
+  projects: Project[];
+  setProjects: (projects: Project[]) => void;
+  upsertProject: (project: Project) => void;
+  removeProject: (projectId: string) => void;
+  clearProjects: () => void;
 }
-const projectStore : StateCreator<ProjectState> = (set) => ({
-    projects : [],
-    addProject : (project) => {
-        set((state) => ({
-            projects : [project, ...state.projects]
-        }))
-    },
-    removeProject : (projectId : string) => {
-        set((state) => ({
-            projects : state.projects.filter((project) => project.id !== projectId)
-        }))
-    },
-    setProjects : (projects : Project[]) => {
-        set({ projects })
-    },
-    clearProjects : () => {
-        set({ projects : [] })
-    }
-})
 
-const useProjectStore = create(
-    devtools(
-       projectStore
-    )
-)
+const useProjectStore = create<ProjectState>()(
+  devtools(
+    (set) => ({
+      projects: [],
+
+      setProjects: (projects) => {
+        set({ projects });
+      },
+
+      upsertProject: (project) => {
+        set((state) => {
+          const exists = state.projects.some((item) => item.id === project.id);
+
+          if (!exists) {
+            return {
+              projects: [project, ...state.projects],
+            };
+          }
+
+          return {
+            projects: state.projects.map((item) =>
+              item.id === project.id ? { ...item, ...project } : item,
+            ),
+          };
+        });
+      },
+
+      removeProject: (projectId) => {
+        set((state) => ({
+          projects: state.projects.filter((project) => project.id !== projectId),
+        }));
+      },
+
+      clearProjects: () => {
+        set({ projects: [] });
+      },
+    }),
+    {
+      name: "spinup-project-store",
+    },
+  ),
+);
 
 export default useProjectStore;

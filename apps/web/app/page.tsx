@@ -4,18 +4,22 @@ import useProjectStore from "./store/projectStore";
 import axios from "axios";
 import { useRef, Ref, useEffect } from "react";
 import { useUser } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
 
 export default function LandingPage(){
   const projectTypeRef = useRef<HTMLSelectElement>(null);
   const projectNameRef = useRef<HTMLInputElement>(null);
 
   const projects = useProjectStore((state) => state.projects);
-  const addProject = useProjectStore((state) => state.addProject);
   const removeProject = useProjectStore((state) => state.removeProject);
 
   const { user, isSignedIn } = useUser();
   const setProjects = useProjectStore((state) => state.setProjects);
   const clearProjects = useProjectStore((state) => state.clearProjects);
+
+  const upsertProject = useProjectStore((state) => state.upsertProject);
+
+  const router = useRouter();
 
   useEffect(()=>{
     if(isSignedIn && user){
@@ -50,11 +54,7 @@ export default function LandingPage(){
         return;
       }
 
-      addProject({
-        id : project.id,
-        name : project.name,
-        type : project.type
-      })
+      upsertProject(project);
       console.log(`Zustand Project State Variable Returns : ${JSON.stringify(projects,null,2)}`);
     }
     catch(err){
@@ -149,3 +149,4 @@ export const InputSelect = ({
     <button onClick={onClick}>Submit</button>
   </div>
 }
+

@@ -220,8 +220,27 @@ export async function GET(){
                 ownerId: auth.dbUser.id,
                 deletedAt: null
             },
+            select: {
+                id: true,
+                name: true,
+                type: true,
+
+                status: true,
+                statusReason: true,
+
+                assignedInstanceId: true,
+                publicIp: true,
+                containerName: true,
+
+                lastEventType: true,
+                lastEventMessage: true,
+                lastEventAt: true,
+
+                createdAt: true,
+                updatedAt: true,
+            },
             orderBy: {
-                id: "desc"
+                updatedAt: "desc",
             }
         });
 
