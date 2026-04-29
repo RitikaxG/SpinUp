@@ -10,8 +10,6 @@ export default function LandingPage(){
   const projectTypeRef = useRef<HTMLSelectElement>(null);
   const projectNameRef = useRef<HTMLInputElement>(null);
 
-  // const removeProject = useProjectStore((state) => state.removeProject);
-
   const { user, isSignedIn } = useUser();
   const setProjects = useProjectStore((state) => state.setProjects);
   const clearProjects = useProjectStore((state) => state.clearProjects);
@@ -61,19 +59,6 @@ export default function LandingPage(){
     }
   }
 
-  // const deleteProject = async (projectId : string) => {
-  //   try{
-  //     const deleted = await axios.delete(`/api/project/?id=${projectId}`);
-  //     console.log(deleted);
-  //     removeProject(projectId);
-  //   }
-  //   catch(err : unknown){
-  //     if(err instanceof Error){
-  //       console.error(`Error deleting project ${err.message}`);
-  //     }
-  //   }
-  // }
-
   return <div className="relative bg-black max-w-screen h-screen overflow-y-hidden">
     <motion.div className="absolute top-[-200px] left-[400px] w-[800px] h-[800px] rounded-b-full"
       animate={{ scale : [1.25,1.5,1.25], opacity : [0.7, 1 , 0.7 ] }}
@@ -99,17 +84,6 @@ export default function LandingPage(){
 
         <InputSelect reference1={projectNameRef} reference2={projectTypeRef} option1="NEXTJS" option2="REACT" option3="REACT_NATIVE" onClick={createProject}/>
 
-        {/* <div>{projects.map((project,i) => {
-          return <div key={i} className="flex gap-5">
-
-          <div>{project.id}</div>
-          <div>{project.name}</div>
-          <div>{project.type}</div>
-          <button onClick={()=>{
-            deleteProject(project.id)
-          }}>Delete</button>
-          </div>
-        })}</div> */}
     </div>
 
     

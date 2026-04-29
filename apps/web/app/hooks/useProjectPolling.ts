@@ -52,32 +52,18 @@ export function useProjectPolling(projectId: string | null) {
     }
 
     let cancelled = false;
-    let latestStatus: ProjectStatus | null = null;
-    let intervalId: ReturnType<typeof setInterval> | null = null;
 
-    const fetchOnce = async (showLoading: boolean) => {
+    const fetchInitialProject = async () => {
       try {
-        if (showLoading) {
-          setIsLoading(true);
-        }
+        setIsLoading(true);
 
         const nextProject = await fetchProjectById(projectId);
 
         if (cancelled) return;
 
-        latestStatus = nextProject.status;
         setProject(nextProject);
         upsertProject(nextProject);
         setError(null);
-
-        if (
-          intervalId &&
-          latestStatus &&
-          !POLLING_STATUSES.has(latestStatus)
-        ) {
-          clearInterval(intervalId);
-          intervalId = null;
-        }
       } catch (err) {
         if (cancelled) return;
 
@@ -85,35 +71,51 @@ export function useProjectPolling(projectId: string | null) {
           err instanceof Error ? err.message : "Failed to fetch project";
         setError(message);
       } finally {
-        if (!cancelled && showLoading) {
+        if (!cancelled) {
           setIsLoading(false);
         }
       }
     };
 
-    void fetchOnce(true);
+    void fetchInitialProject();
 
-    intervalId = setInterval(() => {
-      if (latestStatus && !POLLING_STATUSES.has(latestStatus)) {
-        if (intervalId) {
-          clearInterval(intervalId);
-          intervalId = null;
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, upsertProject]);
+
+  useEffect(() => {
+    if (!projectId || !project || !POLLING_STATUSES.has(project.status)) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const intervalId = setInterval(() => {
+      void (async () => {
+        try {
+          const nextProject = await fetchProjectById(projectId);
+
+          if (cancelled) return;
+
+          setProject(nextProject);
+          upsertProject(nextProject);
+          setError(null);
+        } catch (err) {
+          if (cancelled) return;
+
+          const message =
+            err instanceof Error ? err.message : "Failed to fetch project";
+          setError(message);
         }
-
-        return;
-      }
-
-      void fetchOnce(false);
+      })();
     }, POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;
-
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
+      clearInterval(intervalId);
     };
-  }, [projectId, upsertProject]);
+  }, [projectId, project?.status, upsertProject]);
 
   return {
     project,
