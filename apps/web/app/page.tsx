@@ -10,8 +10,7 @@ export default function LandingPage(){
   const projectTypeRef = useRef<HTMLSelectElement>(null);
   const projectNameRef = useRef<HTMLInputElement>(null);
 
-  const projects = useProjectStore((state) => state.projects);
-  const removeProject = useProjectStore((state) => state.removeProject);
+  // const removeProject = useProjectStore((state) => state.removeProject);
 
   const { user, isSignedIn } = useUser();
   const setProjects = useProjectStore((state) => state.setProjects);
@@ -55,25 +54,25 @@ export default function LandingPage(){
       }
 
       upsertProject(project);
-      console.log(`Zustand Project State Variable Returns : ${JSON.stringify(projects,null,2)}`);
+      router.push("/projects");
     }
     catch(err){
       console.error(`Error creating new project ${err}`);
     }
   }
 
-  const deleteProject = async (projectId : string) => {
-    try{
-      const deleted = await axios.delete(`/api/project/?id=${projectId}`);
-      console.log(deleted);
-      removeProject(projectId);
-    }
-    catch(err : unknown){
-      if(err instanceof Error){
-        console.error(`Error deleting project ${err.message}`);
-      }
-    }
-  }
+  // const deleteProject = async (projectId : string) => {
+  //   try{
+  //     const deleted = await axios.delete(`/api/project/?id=${projectId}`);
+  //     console.log(deleted);
+  //     removeProject(projectId);
+  //   }
+  //   catch(err : unknown){
+  //     if(err instanceof Error){
+  //       console.error(`Error deleting project ${err.message}`);
+  //     }
+  //   }
+  // }
 
   return <div className="relative bg-black max-w-screen h-screen overflow-y-hidden">
     <motion.div className="absolute top-[-200px] left-[400px] w-[800px] h-[800px] rounded-b-full"
@@ -100,7 +99,7 @@ export default function LandingPage(){
 
         <InputSelect reference1={projectNameRef} reference2={projectTypeRef} option1="NEXTJS" option2="REACT" option3="REACT_NATIVE" onClick={createProject}/>
 
-        <div>{projects.map((project,i) => {
+        {/* <div>{projects.map((project,i) => {
           return <div key={i} className="flex gap-5">
 
           <div>{project.id}</div>
@@ -110,7 +109,7 @@ export default function LandingPage(){
             deleteProject(project.id)
           }}>Delete</button>
           </div>
-        })}</div>
+        })}</div> */}
     </div>
 
     
